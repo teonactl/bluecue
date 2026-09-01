@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=BlueCue
+Comment=Instrada file audio e microfono verso più output Bluetooth/hardware
+Exec=bluecue
+Icon=bluecue
+Categories=AudioVideo;Audio;
+Terminal=false

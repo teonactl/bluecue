@@ -6,11 +6,17 @@
     </linearGradient>
   </defs>
   <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#bg)"/>
-  <!-- Cue: triangolo di riproduzione -->
-  <path d="M46 38 L46 90 L84 64 Z" fill="#FFFFFF"/>
-  <!-- Blue: runa Bluetooth stilizzata -->
-  <g transform="translate(82,14)" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none">
-    <path d="M12 2 L12 22"/>
-    <path d="M12 2 L20 8 L12 12 L20 16 L12 22"/>
-  </g>
+
+  <!-- Onde Bluetooth in ingresso: irradiano a sinistra dal nodo sorgente -->
+  <path d="M30 44 A28 28 0 0 0 30 84" stroke="#5AD1E6" stroke-width="6" stroke-linecap="round" fill="none"/>
+  <path d="M22 34 A42 42 0 0 0 22 94" stroke="#5AD1E6" stroke-width="6" stroke-linecap="round" fill="none" opacity="0.6"/>
+
+  <!-- Fan-out: un nodo sorgente instradato verso tre zone -->
+  <circle cx="38" cy="64" r="9" fill="#FFFFFF"/>
+  <path d="M46 60 L82 34" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+  <path d="M47 64 L86 64" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+  <path d="M46 68 L82 94" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="88" cy="30" r="7.5" fill="#FFFFFF"/>
+  <circle cx="92" cy="64" r="7.5" fill="#5AD1E6"/>
+  <circle cx="88" cy="98" r="7.5" fill="#FFFFFF"/>
 </svg>

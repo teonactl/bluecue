@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# softprops/action-gh-release (sotto) deve poter creare/aggiornare tag e
+# release — permesso non concesso di default alle PR da fork, ma i passi
+# che lo usano sono comunque disabilitati lì (if: github.ref == refs/heads/main).
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     # Piattaforma "di riferimento" del progetto (PipeWireEngine/BlueZManager,
@@ -39,6 +45,54 @@ jobs:
       - name: Compila
         run: cmake --build build
 
+      # --- Distribuzione (solo push su main, vedi i singoli step) ---
+      # AppImage: stesso schema linuxdeploy usato da altri progetti di
+      # questo autore (OQL) — un solo file autocontenuto, gira su
+      # qualunque distro senza installazione.
+      - name: Pacchettizza AppImage
+        if: github.ref == 'refs/heads/main'
+        run: |
+          wget -q -O linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          wget -q -O linuxdeploy-plugin-qt \
+            https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          chmod +x linuxdeploy linuxdeploy-plugin-qt
+
+          install -Dm755 build/bluecue AppDir/usr/bin/bluecue
+          install -Dm644 res/icon.svg AppDir/usr/share/icons/hicolor/scalable/apps/bluecue.svg
+          install -Dm644 res/bluecue.desktop AppDir/usr/share/applications/bluecue.desktop
+
+          QMAKE=$(which qmake6 || which qmake) \
+          APPIMAGE_EXTRACT_AND_RUN=1 \
+          ./linuxdeploy --appdir AppDir --plugin qt --output appimage
+
+          find . -maxdepth 1 -name '*.AppImage' \
+            ! -name 'linuxdeploy' ! -name 'linuxdeploy-plugin-qt' \
+            -exec mv {} bluecue-linux.AppImage \;
+
+      - name: Carica artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bluecue-linux
+          path: bluecue-linux.AppImage
+          retention-days: 30
+
+      # tag_name fisso "dev-latest" (prerelease, mai "latest" vero) invece
+      # di un tag per commit: un solo link stabile da mettere nella pagina
+      # di download, sovrascritto ad ogni push su main — stesso schema di
+      # OQL (https://github.com/teonactl/oql).
+      - name: Pubblica su dev-latest
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: "Build automatica (ultimo main)"
+          prerelease: true
+          make_latest: false
+          body: "Ultima build automatica dal branch `main`. Aggiornata ad ogni push. Nessuna garanzia di stabilità."
+          files: bluecue-linux.AppImage
+
   build-macos:
     # macos-14+ sono runner Apple Silicon (arm64) nativi, non emulazione
     # Intel — stessa architettura target di CoreAudioEngine/
@@ -53,6 +107,23 @@ jobs:
       - name: Installa Qt (Homebrew)
         run: brew install qt ninja
 
+      # icon.icns va generato PRIMA del configure: CMakeLists.txt lo
+      # include nel bundle solo se il file esiste già a quel punto (vedi
+      # il commento lì) — se questo step si spostasse dopo "Configura" il
+      # bundle finirebbe senza icona custom, senza errore visibile.
+      - name: Genera icona
+        if: github.ref == 'refs/heads/main'
+        run: |
+          brew install librsvg
+          mkdir -p res/icon.iconset
+          for size in 16 32 128 256 512; do
+            rsvg-convert -w $size -h $size res/icon.svg \
+              -o res/icon.iconset/icon_${size}x${size}.png
+            rsvg-convert -w $((size*2)) -h $((size*2)) res/icon.svg \
+              -o res/icon.iconset/icon_${size}x${size}@2x.png
+          done
+          iconutil -c icns res/icon.iconset -o res/icon.icns
+
       - name: Configura
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -60,6 +131,66 @@ jobs:
 
       - name: Compila
         run: cmake --build build
+
+      # --- Distribuzione (solo push su main) ---
+      - name: Deploy Qt nel bundle
+        if: github.ref == 'refs/heads/main'
+        run: |
+          "$(brew --prefix qt)/bin/macdeployqt" build/bluecue-app.app
+
+      # Firma ad-hoc (nessun account Apple Developer): senza, Gatekeeper
+      # blocca l'app al primo avvio dopo il download. Ordine bottom-up
+      # (dylib sciolte, poi PlugIns, poi ogni .framework dal binario Mach-O
+      # interno al bundle, infine l'app stessa) — un framework firmato
+      # prima del suo binario interno invalida la propria firma.
+      - name: Firma (ad-hoc)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          find build/bluecue-app.app/Contents/Frameworks -maxdepth 1 -name "*.dylib" \
+            -exec codesign --sign - --force {} \;
+          find build/bluecue-app.app/Contents/PlugIns -name "*.dylib" \
+            -exec codesign --sign - --force {} \;
+          find build/bluecue-app.app/Contents/Frameworks -maxdepth 1 -name "*.framework" | while read fw; do
+            bin=$(basename "$fw" .framework)
+            find "$fw" -type f -name "$bin" -exec codesign --sign - --force {} \;
+            codesign --sign - --force "$fw"
+          done
+          codesign --sign - --force build/bluecue-app.app
+
+      # Staging dir invece di puntare hdiutil direttamente a bluecue-app.app:
+      # hdiutil -srcfolder copia il CONTENUTO della cartella sorgente nella
+      # root del DMG, quindi serve una cartella che CONTIENE il bundle
+      # (rinominato qui in BlueCue.app, il nome che l'utente vede) perché
+      # il DMG finisca con BlueCue.app trascinabile in root, non solo Contents/.
+      - name: Crea DMG
+        if: github.ref == 'refs/heads/main'
+        run: |
+          STAGING=$(mktemp -d)
+          ditto build/bluecue-app.app "$STAGING/BlueCue.app"
+          hdiutil create -volname "BlueCue" \
+            -srcfolder "$STAGING" \
+            -ov -format UDZO \
+            build/BlueCue-macOS.dmg
+          rm -rf "$STAGING"
+
+      - name: Carica artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueCue-macOS
+          path: build/BlueCue-macOS.dmg
+          retention-days: 30
+
+      - name: Pubblica su dev-latest
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: "Build automatica (ultimo main)"
+          prerelease: true
+          make_latest: false
+          body: "Ultima build automatica dal branch `main`. Aggiornata ad ogni push. Nessuna garanzia di stabilità."
+          files: build/BlueCue-macOS.dmg
 
   build-windows:
     # Primo test reale del backend Windows (WasapiEngine/
@@ -90,8 +221,49 @@ jobs:
       - name: Configura ambiente MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
+      # icon.ico serve solo in fase di compilazione (compilazione della
+      # risorsa .rc, non del configure) — generato comunque qui, prima di
+      # tutto, per semplicità e coerenza con lo step analogo su macOS.
+      - name: Genera icona
+        if: github.ref == 'refs/heads/main'
+        run: magick res/icon.svg -background none -define icon:auto-resize=256,128,64,48,32,16 res/icon.ico
+
       - name: Configura
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Compila
         run: cmake --build build
+
+      # --- Distribuzione (solo push su main) ---
+      # Zip portatile invece di un vero installer (niente Inno Setup in
+      # questa prima versione): windeployqt raccoglie tutte le DLL Qt
+      # necessarie accanto all'exe, il runtime MSVC resta a carico
+      # dell'utente (vc_redist, quasi sempre già presente su Windows 10/11
+      # con altro software installato).
+      - name: Pacchettizza
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist\BlueCue -Force | Out-Null
+          Copy-Item build\bluecue.exe dist\BlueCue\
+          windeployqt --release --compiler-runtime dist\BlueCue\bluecue.exe
+          Compress-Archive -Path dist\BlueCue\* -DestinationPath BlueCue-windows.zip
+
+      - name: Carica artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueCue-windows
+          path: BlueCue-windows.zip
+          retention-days: 30
+
+      - name: Pubblica su dev-latest
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: "Build automatica (ultimo main)"
+          prerelease: true
+          make_latest: false
+          body: "Ultima build automatica dal branch `main`. Aggiornata ad ogni push. Nessuna garanzia di stabilità."
+          files: BlueCue-windows.zip

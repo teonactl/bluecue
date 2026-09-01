@@ -80,6 +80,24 @@ endif()
 
 qt_add_executable(bluecue ${APP_SOURCES})
 
+if(WIN32)
+    # Icona dell'eseguibile: icon.ico va generato dalla CI (da res/icon.svg)
+    # PRIMA della vera compilazione, ma non serve già al configure — il
+    # file .rc viene compilato solo in fase di build. Percorso relativo
+    # risolto dal compilatore risorse rispetto alla cartella di bluecue.rc
+    # stesso, quindi icon.ico va generato dentro res/, non altrove.
+    target_sources(bluecue PRIVATE res/bluecue.rc)
+endif()
+
+# WIN32_EXECUTABLE (niente console dietro la finestra) e MACOSX_BUNDLE
+# (vero .app invece di un binario nudo, necessario per macdeployqt/DMG) —
+# proprietà ignorate silenziosamente sulle piattaforme dove non si
+# applicano, quindi impostate qui una volta sola invece che per-piattaforma.
+set_target_properties(bluecue PROPERTIES
+    WIN32_EXECUTABLE TRUE
+    MACOSX_BUNDLE TRUE
+)
+
 if(APPLE)
     # qt_add_qml_module (sotto) genera una cartella "BlueCue/" per il
     # modulo QML (dall'URI) nella stessa build dir dove va scritto
@@ -92,7 +110,22 @@ if(APPLE)
     # Apple, il binario prodotto si chiama diversamente dall'URI del
     # modulo quanto basta a non collidere nemmeno ignorando le
     # maiuscole/minuscole.
-    set_target_properties(bluecue PROPERTIES OUTPUT_NAME "bluecue-app")
+    set_target_properties(bluecue PROPERTIES
+        OUTPUT_NAME "bluecue-app"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/res/Info.plist.in"
+        MACOSX_BUNDLE_ICON_FILE icon
+    )
+
+    # icon.icns va generato dalla CI (da res/icon.svg) PRIMA del configure,
+    # a differenza di icon.ico: MACOSX_PACKAGE_LOCATION è letta al
+    # configure, non al build — se il file non esiste ancora qui, va
+    # semplicemente saltato (bundle senza icona custom) invece di rompere
+    # la build in locale, dove nessuno lo genera mai.
+    set(_MACOS_ICON "${CMAKE_SOURCE_DIR}/res/icon.icns")
+    if(EXISTS "${_MACOS_ICON}")
+        set_source_files_properties("${_MACOS_ICON}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+        target_sources(bluecue PRIVATE "${_MACOS_ICON}")
+    endif()
 endif()
 
 qt_add_qml_module(bluecue
