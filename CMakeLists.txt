@@ -70,6 +70,21 @@ endif()
 
 qt_add_executable(bluecue ${APP_SOURCES})
 
+if(APPLE)
+    # qt_add_qml_module (sotto) genera una cartella "BlueCue/" per il
+    # modulo QML (dall'URI) nella stessa build dir dove va scritto
+    # l'eseguibile "bluecue" — su APFS, il filesystem di default di
+    # macOS, i nomi non sono case-sensitive: "BlueCue" e "bluecue"
+    # risultano lo STESSO percorso, e il linker fallisce
+    # ("ld: open() failed, errno=21", EISDIR — trova una cartella dove si
+    # aspettava di scrivere il file) — scoperto dalla CI macOS, mai un
+    # problema su Linux (ext4, case-sensitive). Soluzione minima: solo su
+    # Apple, il binario prodotto si chiama diversamente dall'URI del
+    # modulo quanto basta a non collidere nemmeno ignorando le
+    # maiuscole/minuscole.
+    set_target_properties(bluecue PROPERTIES OUTPUT_NAME "bluecue-app")
+endif()
+
 qt_add_qml_module(bluecue
     URI BlueCue
     VERSION 1.0

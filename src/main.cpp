@@ -2,6 +2,7 @@
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QUrl>
 
 #include "audio/AudioEngine.h"
 #include "audio/PatchManager.h"
@@ -108,7 +109,13 @@ int main(int argc, char *argv[])
         &app, []() { QCoreApplication::exit(-1); },
         Qt::QueuedConnection);
 
-    engine.loadFromModule("BlueCue", "Main");
+    // loadFromModule() esiste solo da Qt 6.5 in poi — la CI su Linux ha
+    // scoperto che il pacchetto Qt6 di apt sulle immagini GitHub Actions è
+    // più vecchio. load(QUrl) fa la stessa cosa (il modulo QML "BlueCue"
+    // registra comunque le sue risorse sotto qrc:/qt/qml/BlueCue/, per
+    // costruzione di qt_add_qml_module in CMakeLists.txt) mantenendo la
+    // compatibilità con qualunque Qt6, non solo l'ultimo.
+    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/BlueCue/Main.qml")));
 
     return app.exec();
 }
