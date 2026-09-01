@@ -441,12 +441,16 @@
       <div class="dl-card">
         <div class="dl-icon">🪟</div>
         <div class="dl-os">Windows</div>
-        <div class="dl-note">Windows 10 / 11 x86_64<br>Archivio .zip portatile (nessun installer)</div>
+        <div class="dl-note">Windows 10 / 11 x86_64<br>Installer — menu Start, desktop, runtime incluso</div>
         <a class="btn-dl"
-           href="https://github.com/teonactl/bluecue/releases/download/dev-latest/BlueCue-windows.zip">
-          ⬇ Scarica .zip
+           href="https://github.com/teonactl/bluecue/releases/download/dev-latest/BlueCue-windows-setup.exe">
+          ⬇ Scarica l'installer
         </a>
-        <div class="dl-ver"><a href="https://github.com/teonactl/bluecue/releases/tag/dev-latest">dev-latest →</a></div>
+        <div class="dl-ver">
+          <a href="https://github.com/teonactl/bluecue/releases/download/dev-latest/BlueCue-windows.zip">oppure lo zip portatile</a>
+          &nbsp;·&nbsp;
+          <a href="https://github.com/teonactl/bluecue/releases/tag/dev-latest">dev-latest →</a>
+        </div>
       </div>
     </div>
 
@@ -485,19 +489,22 @@
       </div>
 
       <div class="install-platform">
-        <div class="install-platform-title">🪟 Windows — Zip portatile</div>
+        <div class="install-platform-title">🪟 Windows — Installer</div>
         <ol>
           <li>Se il browser mostra <strong>"Questo file potrebbe essere dannoso"</strong> clicca <strong>Mantieni comunque</strong> (o <strong>Keep anyway</strong>).</li>
-          <li>Estrai lo zip: la cartella <strong>BlueCue</strong> contiene <code>bluecue.exe</code> e le DLL necessarie — non spostare l'exe fuori dalla cartella.</li>
-          <li>Avvia <strong>bluecue.exe</strong>. Se appare <strong>Windows Defender SmartScreen</strong> con "Il PC è stato protetto":<br>
+          <li>Avvia il file <strong>.exe</strong> scaricato.</li>
+          <li>Se appare <strong>Windows Defender SmartScreen</strong> con "Il PC è stato protetto":<br>
             clicca <strong>"Ulteriori informazioni"</strong> → <strong>"Esegui comunque"</strong>.</li>
+          <li>Segui la procedura guidata — installa anche il runtime Visual C++ necessario, in automatico.</li>
         </ol>
         <div class="why">
           <strong>Perché appare SmartScreen?</strong> Questa prima versione Windows non è firmata con un
-          certificato code-signing a pagamento, quindi SmartScreen avvisa per l'exe non firmato. Il
+          certificato code-signing a pagamento, quindi SmartScreen avvisa per l'installer non firmato. Il
           codice sorgente è pubblico su
           <a href="https://github.com/teonactl/bluecue">github.com/teonactl/bluecue</a> — puoi
-          verificarlo o compilarlo tu stesso.
+          verificarlo o compilarlo tu stesso. In alternativa all'installer c'è anche uno
+          <a href="https://github.com/teonactl/bluecue/releases/download/dev-latest/BlueCue-windows.zip">zip portatile</a>:
+          estrai la cartella <strong>BlueCue</strong> e avvia <code>bluecue.exe</code> direttamente, senza installare nulla.
         </div>
       </div>
     </div>
