@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    # Piattaforma "di riferimento" del progetto (PipeWireEngine/BlueZManager,
+    # vedi src/audio/AudioEngine.h) — deve sempre passare.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installa dipendenze
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build build-essential pkg-config \
+            qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools \
+            qml6-module-qtquick-controls qml6-module-qtquick-layouts \
+            qml6-module-qtqml-workerscript libgl1-mesa-dev \
+            libpipewire-0.3-dev libspa-0.2-dev libsndfile1-dev
+
+      - name: Configura
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Compila
+        run: cmake --build build
+
+  build-macos:
+    # macos-14+ sono runner Apple Silicon (arm64) nativi, non emulazione
+    # Intel — stessa architettura target di CoreAudioEngine/
+    # AppleBluetoothManager (vedi src/audio/CoreAudioEngine.h). Primo test
+    # reale di quel backend: scritto seguendo la documentazione Apple ma
+    # mai compilato in locale (l'ambiente di sviluppo di questo progetto è
+    # Linux) — qui ci si aspettano dei fix in un paio di iterazioni.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installa Qt (Homebrew)
+        run: brew install qt ninja
+
+      - name: Configura
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix qt)"
+
+      - name: Compila
+        run: cmake --build build
+
+  build-windows-placeholder:
+    # Nessun backend Windows esiste ancora (nessuna implementazione WASAPI
+    # di AudioEngine/BluetoothManager, a differenza di macOS) — questo job
+    # fallisce DI PROPOSITO finché non viene scritto: serve da promemoria/
+    # struttura pronta per quando affronteremo il porting Windows, non da
+    # test reale. continue-on-error lo tiene rosso senza bloccare il resto
+    # della pipeline.
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configura (fallimento previsto: nessun backend Windows)
+        run: cmake -S . -B build
