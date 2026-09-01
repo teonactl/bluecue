@@ -14,18 +14,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Installa dipendenze
+      - name: Installa dipendenze di sistema
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build build-essential pkg-config \
-            qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools \
-            qml6-module-qtquick-controls qml6-module-qtquick-layouts \
-            qml6-module-qtqml-workerscript libgl1-mesa-dev \
-            libpipewire-0.3-dev libspa-0.2-dev libsndfile1-dev
+            libpipewire-0.3-dev libspa-0.2-dev libsndfile1-dev \
+            libgl1-mesa-dev libxkbcommon-dev
+
+      # Qt via aqtinstall invece del pacchetto apt: qt6-base-dev su
+      # ubuntu-latest è più vecchio di 6.5 e non ha
+      # QQmlApplicationEngine::loadFromModule usato in src/main.cpp
+      # (scoperto nel primo run di questa CI).
+      - name: Installa Qt (aqtinstall)
+        run: |
+          pip install aqtinstall
+          python3 -m aqt install-qt linux desktop 6.8.2 gcc_64 \
+            -m qtdeclarative qtshadertools qtquickcontrols2 \
+            -O ${{ github.workspace }}/qt
 
       - name: Configura
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/qt/6.8.2/gcc_64
 
       - name: Compila
         run: cmake --build build

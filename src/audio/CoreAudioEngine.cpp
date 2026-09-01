@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <vector>
@@ -169,7 +170,11 @@ struct CoreAudioEngine::Impl
         std::atomic<bool> active{true};
         void *callbackContext = nullptr; // FileStreamCallbackContext*, da liberare con delete alla rimozione
     };
-    QMap<uint32_t, std::unique_ptr<FileStreamState>> fileStreams;
+    // std::map, non QMap: il valore è move-only (std::unique_ptr) e QMap
+    // (a differenza di std::map) richiede che il valore sia
+    // copy-assegnabile anche solo per compilare insert() — scoperto in CI
+    // su macOS (vedi il commento generale in cima al file).
+    std::map<uint32_t, std::unique_ptr<FileStreamState>> fileStreams;
     uint32_t nextFileStreamId = 0x40000000; // ben oltre lo spazio dei veri AudioObjectID
     uint32_t nextVirtualSinkId = 0x50000000;
 
@@ -197,7 +202,7 @@ struct CoreAudioEngine::Impl
         int channelCount = 2;
         Impl *impl = nullptr;
     };
-    QMap<uint32_t, std::unique_ptr<KeepAliveStream>> keepAliveStreams;
+    std::map<uint32_t, std::unique_ptr<KeepAliveStream>> keepAliveStreams; // vedi la nota su fileStreams sopra
 
     // --- Discovery ---
 
@@ -388,9 +393,9 @@ struct CoreAudioEngine::Impl
         // list può poi cambiare senza dover ripetere questo passo, perché
         // l'AudioDeviceID dell'aggregate stesso resta lo stesso.
         auto streamIt = fileStreams.find(producerNodeId);
-        if (streamIt != fileStreams.end() && streamIt.value()->queue) {
+        if (streamIt != fileStreams.end() && streamIt->second->queue) {
             CFStringRef aggregateUidRef = toCFString(aggregateUid);
-            AudioQueueSetProperty(streamIt.value()->queue, kAudioQueueProperty_CurrentDevice,
+            AudioQueueSetProperty(streamIt->second->queue, kAudioQueueProperty_CurrentDevice,
                                    &aggregateUidRef, sizeof(aggregateUidRef));
             CFRelease(aggregateUidRef);
         }
@@ -552,14 +557,14 @@ void CoreAudioEngine::stop()
         d->listenerQueue = nullptr;
     }
 
-    for (auto &entry : d->fileStreams) {
+    for (auto &[id, entry] : d->fileStreams) {
         if (entry->queue)
             AudioQueueDispose(entry->queue, true);
         delete static_cast<FileStreamCallbackContext *>(entry->callbackContext);
     }
     d->fileStreams.clear();
 
-    for (auto &entry : d->keepAliveStreams) {
+    for (auto &[id, entry] : d->keepAliveStreams) {
         if (entry->queue)
             AudioQueueDispose(entry->queue, true);
     }
@@ -709,7 +714,7 @@ QString CoreAudioEngine::createFileStream(const QString &filePath, const QString
         QMutexLocker locker(&d->mutex);
         d->deviceUids.insert(nodeId, streamName); // usato solo internamente per coerenza, non è un output collegabile per UID
     }
-    d->fileStreams.insert(nodeId, std::move(state));
+    d->fileStreams.emplace(nodeId, std::move(state));
 
     AudioNode node;
     node.id = nodeId;
@@ -725,14 +730,14 @@ void CoreAudioEngine::setFileStreamLoopCount(uint32_t nodeId, int loopCount)
 {
     auto it = d->fileStreams.find(nodeId);
     if (it != d->fileStreams.end())
-        it.value()->loopCount.store(loopCount);
+        it->second->loopCount.store(loopCount);
 }
 
 void CoreAudioEngine::setFileStreamReverse(uint32_t nodeId, bool reverse)
 {
     auto it = d->fileStreams.find(nodeId);
     if (it != d->fileStreams.end())
-        it.value()->reverse.store(reverse);
+        it->second->reverse.store(reverse);
 }
 
 void CoreAudioEngine::removeFileStream(uint32_t nodeId)
@@ -750,9 +755,9 @@ void CoreAudioEngine::removeFileStream(uint32_t nodeId)
     for (uint32_t linkId : linkIdsToRemove)
         unlinkNodes(linkId);
 
-    if (it.value()->queue)
-        AudioQueueDispose(it.value()->queue, true);
-    delete static_cast<FileStreamCallbackContext *>(it.value()->callbackContext);
+    if (it->second->queue)
+        AudioQueueDispose(it->second->queue, true);
+    delete static_cast<FileStreamCallbackContext *>(it->second->callbackContext);
     d->fileStreams.erase(it);
 
     {
@@ -766,7 +771,7 @@ void CoreAudioEngine::setFileStreamActive(uint32_t nodeId, bool active)
 {
     auto it = d->fileStreams.find(nodeId);
     if (it != d->fileStreams.end())
-        it.value()->active.store(active);
+        it->second->active.store(active);
 }
 
 uint32_t CoreAudioEngine::linkNodes(uint32_t outputNodeId, uint32_t inputNodeId)
@@ -796,8 +801,8 @@ void CoreAudioEngine::setKeepAliveEnabled(uint32_t sinkNodeId, bool enabled)
     if (!enabled) {
         auto it = d->keepAliveStreams.find(sinkNodeId);
         if (it != d->keepAliveStreams.end()) {
-            if (it.value()->queue)
-                AudioQueueDispose(it.value()->queue, true);
+            if (it->second->queue)
+                AudioQueueDispose(it->second->queue, true);
             d->keepAliveStreams.erase(it);
         }
         return;
@@ -846,7 +851,7 @@ void CoreAudioEngine::setKeepAliveEnabled(uint32_t sinkNodeId, bool enabled)
     }
     AudioQueueStart(queue, nullptr);
 
-    d->keepAliveStreams.insert(sinkNodeId, std::move(stream));
+    d->keepAliveStreams.emplace(sinkNodeId, std::move(stream));
 }
 
 void CoreAudioEngine::identifySink(uint32_t sinkNodeId)

@@ -65,7 +65,13 @@ public:
     void setKeepAlivePingDuration(double seconds) override;
     void setKeepAlivePingPeriod(double seconds) override;
 
-private:
+    // Pubblico (non un dettaglio nascosto dietro "private"): le callback
+    // AudioQueue/property-listener in CoreAudioEngine.cpp sono funzioni
+    // libere (namespace anonimo, non member/friend) e devono poter
+    // nominare CoreAudioEngine::Impl — solo l'ISTANZA "d" sotto resta
+    // privata.
     struct Impl;
+
+private:
     std::unique_ptr<Impl> d;
 };
