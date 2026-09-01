@@ -12,12 +12,17 @@
 // BluetoothManager, vedi src/audio/AudioEngine.h e
 // src/bluetooth/BluetoothManager.h), implementazione diversa per
 // piattaforma — PipeWire+BlueZ su Linux, CoreAudio+IOBluetooth su macOS
-// (Apple Silicon incluso). Windows non ancora implementato.
+// (Apple Silicon incluso), WASAPI+Bluetooth classico su Windows.
 #if defined(Q_OS_MACOS)
 #include "audio/CoreAudioEngine.h"
 #include "bluetooth/AppleBluetoothManager.h"
 using PlatformAudioEngine = CoreAudioEngine;
 using PlatformBluetoothManager = AppleBluetoothManager;
+#elif defined(Q_OS_WIN)
+#include "audio/WasapiEngine.h"
+#include "bluetooth/WindowsBluetoothManager.h"
+using PlatformAudioEngine = WasapiEngine;
+using PlatformBluetoothManager = WindowsBluetoothManager;
 #else
 #include "audio/PipeWireEngine.h"
 #include "bluetooth/BlueZManager.h"

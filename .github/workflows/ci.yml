@@ -52,17 +52,30 @@ jobs:
       - name: Compila
         run: cmake --build build
 
-  build-windows-placeholder:
-    # Nessun backend Windows esiste ancora (nessuna implementazione WASAPI
-    # di AudioEngine/BluetoothManager, a differenza di macOS) — questo job
-    # fallisce DI PROPOSITO finché non viene scritto: serve da promemoria/
-    # struttura pronta per quando affronteremo il porting Windows, non da
-    # test reale. continue-on-error lo tiene rosso senza bloccare il resto
-    # della pipeline.
+  build-windows:
+    # Primo test reale del backend Windows (WasapiEngine/
+    # WindowsBluetoothManager, vedi src/audio/WasapiEngine.h): scritto
+    # seguendo la documentazione WASAPI/Media Foundation/Bluetooth classico
+    # ma mai compilato in locale (l'ambiente di sviluppo di questo
+    # progetto è Linux) — qui ci si aspettano dei fix in un paio di
+    # iterazioni, come già successo per macOS.
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - name: "Configura (fallimento previsto: nessun backend Windows)"
-        run: cmake -S . -B build
+      # jurplel/install-qt-action invece di aqtinstall "a mano" (usato su
+      # Linux): stessa libreria sotto, ma con i nomi modulo già mappati
+      # correttamente per versione — l'installazione diretta con aqtinstall
+      # ci ha già dato nomi modulo sbagliati una volta (vedi la storia di
+      # questo file), meglio non ripetere il tentativo alla cieca due volte.
+      - name: Installa Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.2"
+          modules: "qtshadertools"
+
+      - name: Configura
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Compila
+        run: cmake --build build --config Release

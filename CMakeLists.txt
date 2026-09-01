@@ -13,12 +13,15 @@ set(CMAKE_AUTOUIC ON)
 # Qt6::DBus e libpipewire/libsndfile servono solo al backend Linux
 # (PipeWireEngine/BlueZManager parlano D-Bus e libpipewire). Il backend
 # macOS (CoreAudioEngine/AppleBluetoothManager, vedi src/audio/
-# CoreAudioEngine.h) usa solo framework di sistema Apple — CoreAudio/
-# AudioToolbox per l'audio (incluso il decoding via ExtAudioFile, che
-# sostituisce libsndfile) e IOBluetooth per il Bluetooth — nessuna
-# dipendenza esterna da installare.
+# CoreAudioEngine.h) usa solo framework di sistema Apple, e quello Windows
+# (WasapiEngine/WindowsBluetoothManager, vedi src/audio/WasapiEngine.h)
+# solo componenti di sistema Windows (WASAPI, Media Foundation, Bluetooth
+# classico via bluetoothapis.h) — nessuna dipendenza esterna da installare
+# su nessuno dei due.
 
 if(APPLE)
+    find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
+elseif(WIN32)
     find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
 else()
     find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 DBus)
@@ -58,6 +61,13 @@ if(APPLE)
         src/audio/CoreAudioEngine.h
         src/bluetooth/AppleBluetoothManager.mm
         src/bluetooth/AppleBluetoothManager.h
+    )
+elseif(WIN32)
+    list(APPEND APP_SOURCES
+        src/audio/WasapiEngine.cpp
+        src/audio/WasapiEngine.h
+        src/bluetooth/WindowsBluetoothManager.cpp
+        src/bluetooth/WindowsBluetoothManager.h
     )
 else()
     list(APPEND APP_SOURCES
@@ -118,6 +128,14 @@ if(APPLE)
         "-framework CoreFoundation"
         "-framework IOBluetooth"
         "-framework Foundation"
+    )
+elseif(WIN32)
+    target_link_libraries(bluecue PRIVATE
+        ole32       # CoInitializeEx/CoCreateInstance/PropVariantClear (WasapiEngine)
+        mfplat      # MFStartup/MFShutdown/MFCreateMediaType
+        mfreadwrite # MFCreateSourceReaderFromURL
+        mfuuid      # costanti MF_MT_*/MFAudioFormat_Float
+        Bthprops    # BluetoothFind*/BluetoothSetServiceState (WindowsBluetoothManager)
     )
 else()
     target_include_directories(bluecue PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
