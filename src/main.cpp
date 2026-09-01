@@ -114,13 +114,17 @@ int main(int argc, char *argv[])
         &app, []() { QCoreApplication::exit(-1); },
         Qt::QueuedConnection);
 
-    // loadFromModule() esiste solo da Qt 6.5 in poi — la CI su Linux ha
-    // scoperto che il pacchetto Qt6 di apt sulle immagini GitHub Actions è
-    // più vecchio. load(QUrl) fa la stessa cosa (il modulo QML "BlueCue"
-    // registra comunque le sue risorse sotto qrc:/qt/qml/BlueCue/, per
-    // costruzione di qt_add_qml_module in CMakeLists.txt) mantenendo la
-    // compatibilità con qualunque Qt6, non solo l'ultimo.
-    engine.load(QUrl(QStringLiteral("qrc:/qt/qml/BlueCue/Main.qml")));
+    // ATTENZIONE: NON sostituire con engine.load(QUrl("qrc:/qt/qml/
+    // BlueCue/Main.qml")) — provato una volta per un problema di CI (Qt
+    // troppo vecchio su Ubuntu apt, richiede 6.5+), ma quel percorso qrc
+    // non è quello vero generato da qt_add_qml_module: l'app si rompeva
+    // subito ("No such file or directory") su un Qt6 vero e proprio (6.11
+    // su questa macchina). loadFromModule() risolve il percorso corretto
+    // da solo — il progetto richiede comunque Qt 6.5+ (REQUIRES 6.5 in
+    // CMakeLists.txt), quindi qualunque ambiente di build deve già
+    // averlo; il problema semmai va risolto nella CI (Qt installato lì),
+    // non degradando questa riga.
+    engine.loadFromModule("BlueCue", "Main");
 
     return app.exec();
 }
