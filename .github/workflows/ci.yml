@@ -64,5 +64,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configura (fallimento previsto: nessun backend Windows)
+      - name: "Configura (fallimento previsto: nessun backend Windows)"
         run: cmake -S . -B build
