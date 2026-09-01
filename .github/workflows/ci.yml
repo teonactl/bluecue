@@ -235,11 +235,12 @@ jobs:
         run: cmake --build build
 
       # --- Distribuzione (solo push su main) ---
-      # Zip portatile invece di un vero installer (niente Inno Setup in
-      # questa prima versione): windeployqt raccoglie tutte le DLL Qt
-      # necessarie accanto all'exe, il runtime MSVC resta a carico
-      # dell'utente (vc_redist, quasi sempre già presente su Windows 10/11
-      # con altro software installato).
+      # windeployqt raccoglie tutte le DLL Qt necessarie accanto all'exe.
+      # Da qui si producono DUE pacchetti: uno zip portatile (estrai e
+      # avvia, nessuna installazione) e un vero installer Inno Setup
+      # (installer.iss, alla radice del repo) che in più installa il
+      # runtime Visual C++ redistributable e crea le voci nel menu Start /
+      # sul desktop — stesso schema di OQL (github.com/teonactl/oql).
       - name: Pacchettizza
         if: github.ref == 'refs/heads/main'
         shell: pwsh
@@ -249,12 +250,32 @@ jobs:
           windeployqt --release --compiler-runtime dist\BlueCue\bluecue.exe
           Compress-Archive -Path dist\BlueCue\* -DestinationPath BlueCue-windows.zip
 
-      - name: Carica artifact
+      - name: Crea installer (Inno Setup)
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "vc_redist.x64.exe"
+          $version = git describe --tags --always 2>$null
+          if (-not $version) { $version = "0.1.0" }
+          & 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' `
+            /DMyAppVersion="$version" `
+            /DOutputFile="BlueCue-windows-setup" `
+            installer.iss
+
+      - name: Carica artifact (zip)
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: BlueCue-windows
           path: BlueCue-windows.zip
+          retention-days: 30
+
+      - name: Carica artifact (installer)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlueCue-windows-setup
+          path: BlueCue-windows-setup.exe
           retention-days: 30
 
       - name: Pubblica su dev-latest
@@ -266,4 +287,6 @@ jobs:
           prerelease: true
           make_latest: false
           body: "Ultima build automatica dal branch `main`. Aggiornata ad ogni push. Nessuna garanzia di stabilità."
-          files: BlueCue-windows.zip
+          files: |
+            BlueCue-windows.zip
+            BlueCue-windows-setup.exe
