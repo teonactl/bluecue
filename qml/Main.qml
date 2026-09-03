@@ -496,6 +496,214 @@ ApplicationWindow {
         }
     }
 
+    // Ritardo di output (pulsante "⏱" sulla riga Output, vedi PortRow.qml)
+    // — richiesto esplicitamente dall'utente: l'audio interno arriva prima
+    // di quello trasmesso via Bluetooth (che aggiunge trasporto+decodifica
+    // A2DP), quindi ritardare l'output più veloce li fa suonare di nuovo
+    // insieme. PatchManager::setOutputDelayMs applica il valore subito e lo
+    // persiste per nome stabile del sink (sopravvive a riavvii/
+    // riconnessioni, come il nickname).
+    Dialog {
+        id: delayDialog
+        property int nodeId: -1
+
+        title: qsTr("Ritardo output")
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        anchors.centerIn: parent
+
+        function openForOutput(nodeId, currentDelayMs) {
+            delayDialog.nodeId = nodeId
+            delaySpinBox.value = currentDelayMs
+            delayDialog.open()
+        }
+
+        onAccepted: {
+            if (delayDialog.nodeId >= 0)
+                patchManager.setOutputDelayMs(delayDialog.nodeId, delaySpinBox.value)
+        }
+        onOpened: delaySpinBox.forceActiveFocus()
+
+        ColumnLayout {
+            spacing: 8
+
+            Label {
+                text: qsTr("Ritarda l'audio verso questo output per farlo suonare in sincrono con un altro output più lento (tipicamente una cassa Bluetooth).")
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 280
+            }
+
+            SpinBox {
+                id: delaySpinBox
+                from: 0
+                to: 2000
+                stepSize: 10
+                editable: true
+                textFromValue: (value) => value + " ms"
+                valueFromText: (text) => parseInt(text, 10) || 0
+                Keys.onReturnPressed: delayDialog.accept()
+            }
+
+            Rectangle { Layout.fillWidth: true; height: 1; color: "#5C5A52" }
+
+            // Calibrazione automatica (richiesta esplicitamente
+            // dall'utente: non riusciva a trovare a orecchio il valore
+            // giusto) — riproduce un breve click su questo output e su un
+            // secondo a scelta, lo registra col microfono e calcola da
+            // solo il ritardo giusto invece di doverlo indovinare a mano.
+            Label {
+                text: qsTr("Oppure calibra automaticamente confrontando questo output con un altro (un breve click di test su entrambi, registrato con un microfono).")
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 280
+            }
+
+            Label { text: qsTr("Confronta con:") }
+            ComboBox {
+                id: otherOutputCombo
+                Layout.fillWidth: true
+                model: patchManager.outputs
+                textRole: "description"
+                valueRole: "nodeId"
+            }
+
+            Label {
+                text: patchManager.microphonesModel.length > 0
+                      ? qsTr("Microfono: %1").arg(patchManager.microphonesModel[0].description)
+                      : qsTr("Nessun microfono rilevato — impossibile calibrare automaticamente")
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 280
+                color: patchManager.microphonesModel.length > 0 ? "#CFCFC9" : "#C0392B"
+            }
+
+            Button {
+                id: calibrateButton
+                Layout.fillWidth: true
+                text: patchManager.calibrationInProgress ? qsTr("Calibrazione in corso… (~2s)") : qsTr("🎯 Calibra automaticamente")
+                enabled: !patchManager.calibrationInProgress
+                         && patchManager.microphonesModel.length > 0
+                         && otherOutputCombo.currentValue !== delayDialog.nodeId
+                background: Rectangle {
+                    radius: 4
+                    color: calibrateButton.enabled ? (calibrateButton.pressed ? "#6961C9" : "#7F77DD") : "#9A98A6"
+                }
+                contentItem: Text {
+                    text: calibrateButton.text
+                    font: calibrateButton.font
+                    color: "white"
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                onClicked: {
+                    calibrationResultLabel.text = ""
+                    patchManager.calibrateOutputDelay(delayDialog.nodeId, otherOutputCombo.currentValue,
+                                                       patchManager.microphonesModel[0].nodeId)
+                }
+            }
+
+            Label {
+                id: calibrationResultLabel
+                visible: text.length > 0
+                wrapMode: Text.WordWrap
+                Layout.preferredWidth: 280
+            }
+        }
+
+        Connections {
+            target: patchManager
+            function onCalibrationResult(success, message) {
+                calibrationResultLabel.text = message
+                calibrationResultLabel.color = success ? "#7FD37F" : "#E57373"
+            }
+        }
+    }
+
+    // Elenco degli stream audio applicativi in esecuzione (Firefox, ecc.,
+    // patchManager.appStreamsModel) selezionabili come sorgente in playlist
+    // — richiesto esplicitamente dall'utente. Sceglierne uno aggiunge una
+    // cue "sposta audio app qui" (PatchManager::addAppStreamCue): quando
+    // avviata (come una cue normale), reindirizza quello stream in un sink
+    // virtuale nostro invece di lasciarlo sull'uscita di sistema di
+    // default — "sposta", non "duplica", scelto esplicitamente
+    // dall'utente. Stesso stile del dialog dispositivi Bluetooth qui sopra.
+    Dialog {
+        id: appStreamPickerDialog
+        title: qsTr("Aggiungi sorgente app")
+        standardButtons: Dialog.Close
+        modal: true
+        anchors.centerIn: parent
+        width: 380
+
+        ColumnLayout {
+            width: parent.width
+            spacing: 8
+
+            Label {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("Sposta l'audio di un'app già in riproduzione nella patch bay (smette di sentirsi sull'uscita di sistema).")
+                color: "#CFCFC9"
+            }
+
+            Label {
+                visible: patchManager.appStreamsModel.length === 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                text: qsTr("Nessuno stream audio applicativo rilevato al momento. Avvia la riproduzione nell'app (es. un video su Firefox), poi riapri questo elenco.")
+                color: "#CFCFC9"
+            }
+
+            ListView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(contentHeight, 260)
+                clip: true
+                model: patchManager.appStreamsModel
+                spacing: 4
+
+                delegate: Rectangle {
+                    width: ListView.view.width
+                    height: appStreamRow.implicitHeight + 12
+                    color: "#F0F0EE"
+                    border.color: "#C9C9C4"
+                    radius: 4
+
+                    RowLayout {
+                        id: appStreamRow
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 8
+
+                        Label {
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                            text: modelData.description
+                            color: "#2C2C2A"
+                        }
+
+                        Button {
+                            id: addAppStreamPickButton
+                            text: qsTr("Aggiungi")
+                            background: Rectangle {
+                                radius: 4
+                                color: addAppStreamPickButton.pressed ? "#6961C9" : "#7F77DD"
+                            }
+                            contentItem: Text {
+                                text: addAppStreamPickButton.text
+                                font: addAppStreamPickButton.font
+                                color: "white"
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            onClicked: {
+                                patchManager.addAppStreamCue(modelData.nodeId)
+                                appStreamPickerDialog.close()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Elenco dei dispositivi Bluetooth accoppiati (blueZManager.deviceModel,
     // un QVariantList aggiornato reattivamente da BlueZManager::refreshDevices
     // e dagli esiti di connectDevice/disconnectDevice). "Connetti" avvia
@@ -969,6 +1177,7 @@ ApplicationWindow {
                 showAllPatches: root.showAllPatches
 
                 onAddRequested: fileDialog.open()
+                onAddAppStreamRequested: appStreamPickerDialog.open()
                 onRemoveRequested: (index) => confirmDialog.ask(
                     qsTr("Rimuovere questa traccia dalla playlist?"),
                     function() { patchManager.removeCue(index) })
@@ -1032,6 +1241,7 @@ ApplicationWindow {
                     function() { patchManager.removeOutput(nodeId) })
                 onIdentifyRequested: (nodeId) => patchManager.identifySink(nodeId)
                 onRenameRequested: (nodeId, currentName) => renameDialog.openForOutput(nodeId, currentName)
+                onDelayRequested: (nodeId, currentDelayMs) => delayDialog.openForOutput(nodeId, currentDelayMs)
                 onAnchorChanged: (nodeId, rowIndex, isInput, cx, cy, rx, ry, rw, rh) =>
                     root.registerAnchor(nodeId, rowIndex, isInput, cx, cy, rx, ry, rw, rh)
             }

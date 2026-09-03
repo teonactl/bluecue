@@ -36,6 +36,8 @@ QVariant PortModel::data(const QModelIndex &index, int role) const
         return node.batteryPercentage;
     case MutedRole:
         return node.muted;
+    case DelayMsRole:
+        return node.delayMs;
     default:
         return {};
     }
@@ -51,6 +53,7 @@ QHash<int, QByteArray> PortModel::roleNames() const
         { KindRole, "kind" },
         { BatteryPercentageRole, "batteryPercentage" },
         { MutedRole, "muted" },
+        { DelayMsRole, "delayMs" },
     };
 }
 
@@ -96,6 +99,19 @@ void PortModel::updateBatteryPercentage(uint32_t nodeId, int percentage)
     const int row = static_cast<int>(std::distance(m_nodes.begin(), it));
     const QModelIndex idx = index(row);
     emit dataChanged(idx, idx, { BatteryPercentageRole });
+}
+
+void PortModel::updateDelayMs(uint32_t nodeId, int delayMs)
+{
+    auto it = std::find_if(m_nodes.begin(), m_nodes.end(),
+                            [&](const AudioNode &n) { return n.id == nodeId; });
+    if (it == m_nodes.end() || it->delayMs == delayMs)
+        return;
+
+    it->delayMs = delayMs;
+    const int row = static_cast<int>(std::distance(m_nodes.begin(), it));
+    const QModelIndex idx = index(row);
+    emit dataChanged(idx, idx, { DelayMsRole });
 }
 
 void PortModel::moveNode(int fromIndex, int toIndex)

@@ -787,6 +787,443 @@ qml/
     **Non ancora testato interattivamente dall'utente** (solo build-verify,
     stesso motivo dei punti precedenti — istanza reale in esecuzione).
 
+28. **Ritardo di output regolabile per sink, per sincronizzare audio
+    interno e Bluetooth (2026-09-02)**: richiesto esplicitamente
+    dall'utente — "l'audio interno ha meno delay di quello trasmesso su
+    bluetooth, vorrei poter impostare un ritardo sull'audio interno per
+    poterlo far suonare contemporaneamente". Un sink Bluetooth aggiunge
+    sempre trasporto+decodifica A2DP (tipicamente 100-300ms) rispetto
+    all'audio interno, che parte "in anticipo" se la stessa cue è collegata
+    a entrambi contemporaneamente — la soluzione è ritardare il percorso
+    più veloce, non provare ad "accelerare" quello Bluetooth.
+
+    Realizzato in modo GENERICO (qualunque output, non solo quello
+    interno) interponendo un `pw_filter` dedicato tra le sorgenti e il
+    sink reale, invece di limitarsi a un parametro applicativo: i link
+    PipeWire sono passaggio diretto di campioni, quindi l'unico modo per
+    introdurre un vero ritardo relativo tra due percorsi che condividono la
+    stessa sorgente è interporre un vero stadio di elaborazione nel grafo,
+    non un flag.
+    - **`PipeWireEngine::Impl::DelayFilter`** (nuovo, in
+      `PipeWireEngine.cpp`): un `pw_filter` con 2 porte di ingresso e 2 di
+      uscita in modalità DSP (`spa_format_audio_dsp_build`,
+      `SPA_AUDIO_FORMAT_DSP_F32`, niente `PW_KEY_MEDIA_CLASS` quindi
+      invisibile in UI, stesso principio del generatore keepalive). Un ring
+      buffer per canale (3s di capacità a 48kHz, letto/scritto SOLO dal
+      thread audio in `onDelayFilterProcess`) realizza il ritardo:
+      ogni ciclo scrive i campioni in ingresso in coda al buffer e legge
+      quelli in uscita da `delayFrames` campioni indietro — `delayFrames`
+      è un `std::atomic<int>` (scritto dal thread Qt via
+      `setOutputDelayMs`, letto dal thread audio), stesso principio già
+      usato per `FileStream::reverseRequested`. Creato pigramente alla
+      prima richiesta con delayMs>0 per un dato sink e MAI distrutto per il
+      resto della sessione anche se il ritardo torna a 0 (diventa un
+      passthrough) — evita di dover ricollegare la topologia esistente ad
+      ogni cambio.
+    - **Reindirizzamento trasparente in `linkNodes`**: se il sink di
+      destinazione ha già un filtro attivo, `PipeWireEngine::linkNodes`
+      collega automaticamente alle sue porte di ingresso invece che al sink
+      direttamente — nessuna modifica richiesta a `PatchManager` o al resto
+      del routing (drag&drop, rotazione output, cue polifoniche: tutti
+      continuano a chiamare `linkNodes(sorgente, sinkNodeId)` come prima).
+      Il corpo originale di `linkNodes` (abbinamento porte per canale,
+      retry su discovery incompleto, rollback su errore parziale) è stato
+      estratto in `Impl::createPortLink`, usato anche per il link
+      permanente filtro→sink reale (creato una sola volta non appena
+      PipeWire assegna il nodeId del filtro, stesso pattern asincrono di
+      FileStream/keepalive) — DEVE restare un metodo separato dal
+      `linkNodes` pubblico, altrimenti quel link si richiuderebbe su se
+      stesso invece di raggiungere il sink vero.
+    - **`AudioEngine::setOutputDelayMs`** (nuovo metodo virtuale puro
+      nell'interfaccia astratta): implementato per intero su
+      `PipeWireEngine` (Linux); su `CoreAudioEngine`/`WasapiEngine`
+      (macOS/Windows) è per ora uno stub che segnala l'errore via
+      `engineError` invece di fallire silenziosamente — nessuna cassa
+      Bluetooth reale disponibile per validare un'implementazione nativa su
+      quelle piattaforme in questa sessione.
+    - **`PatchManager::setOutputDelayMs`/`AudioNode::delayMs`/
+      `PortModel::DelayMsRole`**: stesso schema di persistenza per nome
+      stabile del sink già usato da `setOutputNickname` (sopravvive a
+      riavvii/riconnessioni del dispositivo), applicato subito al motore
+      alla riscoperta del sink (`handleSinkNode`). UI: pulsante "⏱" su ogni
+      riga della colonna Output (`PortRow.qml`, stesso stile a pillola di
+      identifica/muto, mostra "⏱ Nms" quando N>0) che apre un dialog con
+      uno `SpinBox` 0-2000ms (`Main.qml`: `delayDialog`).
+
+    **Verificato strutturalmente (2026-09-02)** con un harness standalone
+    (stesso pattern riusato in tutta la storia di questo progetto: chiama
+    `PipeWireEngine` direttamente, bypassando QML) compilato a parte con
+    `moc`/g++ e collegato al vero `PipeWireEngine.cpp`: trovato il sink
+    audio interno reale, chiamato `setOutputDelayMs(sink, 300)`, creato un
+    file stream reale e collegato al sink con `linkNodes`. `pw-dump`
+    (interrogato mentre l'harness era ancora in esecuzione, non dopo la sua
+    uscita — un primo tentativo dopo l'uscita non mostrava più nulla,
+    ovviamente: `stop()` distrugge tutto) conferma ESATTAMENTE la topologia
+    attesa: nodo `bluecue.delay.56` con 2 porte in (`in_0`/`in_1`) e 2 porte
+    out (`out_0`/`out_1`), il file stream collegato alle porte IN del
+    filtro (non al sink direttamente), le porte OUT del filtro collegate
+    permanentemente alle porte reali del sink (`playback_FL`/
+    `playback_FR`). Nessun `engineError` nel log. **Non ancora verificato
+    l'effetto audio reale** (che il ritardo percepito sia effettivamente
+    ~300ms e che l'audio non abbia artefatti/click) — richiede un ascolto
+    reale con una cassa Bluetooth vera collegata in parallelo all'audio
+    interno, lasciato all'utente (vedi
+    [[feedback-user-does-ui-testing]]). Il rate del grafo è assunto 48kHz
+    (hardcoded in `DelayFilter::rate`, stessa assunzione già presente altrove
+    nel codebase per keepalive/identify) — da rivedere se in futuro
+    emergesse un sistema con un sample rate di default diverso.
+
+29. **Catturare l'audio di un'altra applicazione (Firefox, ecc.) come
+    sorgente in playlist, "sposta" non "duplica" (2026-09-02)**: richiesto
+    esplicitamente dall'utente subito dopo il punto 28 — "vorrei poter
+    aggiungere anche gli stream audio come fonte nella tracklist (firefox,
+    o altri stream che potrei aprire sul pc)". Chiesto esplicitamente
+    all'utente se l'audio dell'app dovesse continuare a sentirsi ANCHE
+    sull'uscita di sistema originale (duplica) o smettere di uscire da lì
+    (sposta): scelto "sposta".
+    - **Nuovo `AudioNode::Kind::AppStream`**: `kindFromMediaClass` riconosce
+      ora anche `Stream/Output/Audio` (i nodi di stream di riproduzione di
+      qualunque app, Firefox/VLC/ecc. — prima ignorati del tutto,
+      `Kind::Unknown`). `PatchManager::handleAppStreamNode` li traccia in
+      `m_availableAppStreams` (esclude il nostro stesso `bluecue.appcapture.
+      *`/"-in" per nome), esposti a QML via `appStreamsModel`. Nuovo
+      pulsante "🎧+" in `CueList.qml` apre un elenco (`Main.qml`:
+      `appStreamPickerDialog`) da cui scegliere quale stream catturare.
+    - **`PatchManager::addAppStreamCue(appStreamNodeId)`**: crea una cue con
+      `isAppStream=true` (in coda, non avviata subito — parte con
+      Play/barra spaziatrice come una cue file, riusando IDENTICO tutto il
+      resto dell'infrastruttura cue: pre wait/durata/post wait, drag&drop
+      verso gli output, rotazione output, tutto già generico rispetto al
+      tipo di sorgente). Quando parte (`startCueNow`), invece di
+      `createFileStream` chiama `beginAppStreamCapture`: crea un sink
+      virtuale di cattura dedicato (`PipeWireEngine::createVirtualSink`,
+      nome `bluecue.appcapture.<appStreamNodeId>`) e, una volta correlato
+      per nome il suo nodeId (stesso schema asincrono di
+      `pendingStreamName`), chiama `setStreamTarget` per "spostare" lo
+      stream applicativo lì dentro — `Cue::nodeId` diventa il nodeId del
+      sink di cattura, riusato ovunque il resto del codice si aspetta "il
+      nodo live da cui collegare gli output" (le sue porte `monitor_*`
+      portano l'audio catturato, linkabili con `linkNodes` come qualunque
+      altra sorgente, delay filter compreso — vedi sotto).
+    - **Fix di `createVirtualSink` scoperto per necessità**: il modulo
+      `libpipewire-module-loopback` di base rimanda l'audio catturato
+      ANCHE indietro verso l'uscita di sistema di default tramite il
+      proprio stream di playback interno (il lato "-in") — verificato
+      empiricamente con `pw-dump`, esattamente la duplicazione che
+      l'utente aveva scartato. Fix: `node.autoconnect = false` sulle
+      `playback.props` di quello stream interno, così l'audio catturato
+      resta confinato al sink virtuale finché non è la nostra
+      `linkNodes()` esplicita a instradarlo. Anche `audio.channels`/
+      `audio.position` espliciti (mancavano) e un `node.name` a livello
+      TOP del modulo (prima solo dentro `capture.props`, necessario perché
+      il modulo assegni un `node.group`/`node.link-group` coerente).
+    - **`AudioEngine::setStreamTarget`/`clearStreamTarget`** (nuovi metodi
+      virtuali; stub "non implementato" su CoreAudioEngine/WasapiEngine):
+      usano la metadata "default" di PipeWire (chiave `target.object`,
+      stessa che usano pavucontrol/wpctl) per "spostare" uno stream. **Bug
+      scoperto e risolto nello stesso giro, il più importante di questa
+      voce**: la sola metadata NON basta in modo affidabile.
+      - Il valore va scritto con tipo `Spa:String` esplicito e SENZA
+        virgolette JSON — con un valore JSON-quotato o senza tipo, la
+        metadata risultava impostata correttamente (verificabile con
+        `pw-metadata`) ma WirePlumber la ignorava silenziosamente, nessun
+        errore.
+      - **Molto più subdolo**: con un `DelayFilter` (punto 28) presente
+        OVUNQUE nel grafo — anche per un sink completamente estraneo allo
+        spostamento in corso — WirePlumber smette di onorare
+        `target.object` per QUALUNQUE stream, in modo permanente finché il
+        filtro esiste (non un problema di timing: riprodotto anche
+        aspettando 5+ secondi dalla creazione del filtro prima di provare
+        lo spostamento). Non è stato possibile determinare la causa esatta
+        dentro WirePlumber in tempi ragionevoli — isolato con una serie di
+        harness standalone che hanno escluso PatchManager, il timing, e le
+        proprietà del sink di cattura (reso via via identico, proprietà
+        per proprietà, a un sink creato dalla CLI `pw-loopback` che invece
+        funzionava sempre) come cause, lasciando come unica variabile
+        residua la presenza del filtro.
+      - **Fix robusto**: invece di dipendere dalla cooperazione (dimostrata
+        inaffidabile) del session manager, `setStreamTarget`/
+        `clearStreamTarget` prendono il controllo diretto del link,
+        esattamente come fa già tutto il resto del routing di quest'app.
+        Nuovo tracciamento in `PipeWireEngine::Impl`: `allLinks` (OGNI link
+        del grafo, non solo i nostri, popolato dal discovery del registry
+        su `PW_TYPE_INTERFACE_Link`, prima ignorato) e un listener sulla
+        metadata "default" (`onDefaultMetadataProperty`) che tiene
+        sincronizzato `defaultAudioSinkName` (parsing minimale del JSON
+        `{"name":"..."}` della chiave `default.audio.sink`). `setStreamTarget`
+        imposta comunque la metadata (innocuo, un suggerimento in più) poi,
+        se lo stream non risulta già collegato al sink target
+        (`isNodeLinkedToNode`), distrugge qualunque suo link esistente
+        (`destroyForeignLinksFromNode`, via `pw_registry_destroy` — non
+        bind+`pw_proxy_destroy`, che rilascerebbe solo il nostro
+        riferimento locale senza chiedere al server di distruggere
+        l'oggetto altrui, la stessa primitiva di "pw-link -d") e ne crea
+        uno nuovo con `createPortLink`. `clearStreamTarget` fa il
+        simmetrico all'indietro: cancella la metadata, distrugge il link
+        verso il nostro sink di cattura, e ricollega esplicitamente al sink
+        di sistema corrente (risolto da `defaultAudioSinkName`) — **anche
+        qui scoperto necessario**: uno stream scollegato con un
+        `target.object` appena rimosso NON veniva ripreso in carico da
+        WirePlumber (osservato scollegato per 10+ secondi in un test
+        controllato), a differenza di un semplice scollegamento "grezzo"
+        mai passato da un target esplicito (quello sì, ripreso in carico
+        da solo in ogni test). L'ordine delle due operazioni dentro
+        `clearStreamTarget` conta: cancellare la metadata PRIMA di
+        distruggere il link (mai il contrario, verificato peggiorare la
+        situazione).
+      - `PatchManager::m_appStreamReassertTimer` (5s) riafferma
+        periodicamente `setStreamTarget` per ogni cue "sorgente app"
+        attiva — auto-recovery richiesta esplicitamente dall'utente,
+        idempotente (`isNodeLinkedToNode` la rende un no-op se il link è
+        già quello giusto).
+    - Cue "sorgente app" NON persistite nel file di progetto
+      (`writeProjectToPath` le salta): un nodeId di sessione non stabile
+      non ha nulla di sensato da ricaricare.
+
+    **Verificato end-to-end (2026-09-02)** con una serie di harness
+    standalone (`PipeWireEngine` puro, poi `PatchManager` completo con un
+    `BluetoothManager` finto) contro un vero stream `pw-play` di lunga
+    durata usato come "app" di prova, includendo esplicitamente lo scenario
+    avverso (delay filter presente sul sink di destinazione — verificato
+    con `engine->setOutputDelayMs` chiamato apposta prima del test).
+    Confermato con `pw-dump`, durante l'esecuzione dell'harness (non dopo:
+    `stop()` disfa tutto), l'intera catena `pw-play → sink di cattura
+    (monitor_*) → filtro di ritardo (in_*/out_*) → sink reale
+    (playback_*)` — cattura e ritardo compongono correttamente insieme.
+    Confermato anche il ciclo completo: `addAppStreamCue` → `playCueAt`
+    (sposta davvero, sink di sistema scollegato) → `toggleCueOutput`
+    (instradato nella patch bay) → `removeCue` (stream restituito al sink
+    di sistema corrente, sink di cattura distrutto, nessun residuo
+    `bluecue.appcapture.*` nel grafo). **Lezione generale da questa
+    sessione**: mai lanciare un processo di verifica proprio mentre
+    l'istanza reale dell'app è aperta (successo per caso durante questo
+    sviluppo — vedi [[feedback-check-for-live-instance-before-testing]],
+    scritta apposta dopo averlo fatto per errore a metà di questa stessa
+    sessione). **Testato dall'utente nella UI reale (2026-09-02) — trovati e
+    risolti due problemi reali non emersi con `pw-play`**:
+    - **Messaggio d'errore inutile per diagnosticare**: "Porte non trovate
+      per uno dei due nodi (discovery incompleto?)" non diceva QUALI nodi
+      né se uno dei due fosse addirittura sparito nel frattempo. Esteso a
+      includere entrambi gli id, quante porte ciascuno ha trovato, e se il
+      nodo stesso è ancora noto ("presente" vs "SPARITO") — stato
+      determinante per capire il problema vero sotto. Aggiunti anche
+      `qDebug()` mirati in `beginAppStreamCapture`/la correlazione del sink
+      di cattura/`setStreamTarget` per tracciare l'intera sequenza.
+    - **Bug reale, il più importante**: catturando un video YouTube in
+      Firefox (riproduzione continua, nessuna pausa/pubblicità/interruzione
+      confermata dall'utente), lo stream PipeWire di Firefox (nodeId scelto
+      dal picker) **spariva e ne veniva ricreato uno nuovo** nel giro di
+      pochi istanti — invisibile all'utente (l'audio continuava a sentirsi
+      normalmente da Firefox), ma fatale per la cattura, che teneva un
+      singolo nodeId congelato e si arrendeva non appena spariva.
+      Causa identificata ispezionando le proprietà reali del nodo
+      (`client.api = "pipewire-pulse"`): Firefox passa dal layer di
+      compatibilità PulseAudio, che a quanto pare ricrea il proprio stream
+      più spesso di un client PipeWire nativo, anche a riproduzione
+      ininterrotta. **Fix**: nuovo `AudioNode::appProcessId`
+      (`PW_KEY_APP_PROCESS_ID`, il PID del processo proprietario — stabile
+      anche se lo stream cambia nodeId) e `Cue::appProcessId`, copiato al
+      momento di `addAppStreamCue`. Quando lo stream catturato sparisce
+      (`nodeRemoved`), invece di fermare la cattura si cerca subito un
+      sostituto dallo stesso PID tra gli stream già noti
+      (`findReplacementAppStreamNodeId`); se non c'è ancora,
+      `Cue::appStreamNodeId` resta a 0 ("in attesa") finché
+      `handleAppStreamNode` non ne scopre uno nuovo dallo stesso processo e
+      lo raggancia da solo (`setStreamTarget` di nuovo, sink di cattura
+      mai distrutto/ricreato — resta lo stesso per tutta la cattura).
+      Aggiunti guard espliciti (`appStreamNodeId != 0`) in
+      `stopCueAt`/`setCueLiveActive`: senza, un tentativo con
+      `appStreamNodeId == 0` avrebbe scritto sulla metadata con subject 0,
+      che in PipeWire è quello dei default globali
+      ("default.audio.sink"/ecc.), non "nessuno stream".
+    - Anche il controllo "non staccare un link se non è già verificato che
+      si può ricreare" (vedi sopra) si è rivelato utile in pratica: nei log
+      reali ha correttamente rimandato invece di rompere qualcosa quando il
+      sink di cattura non aveva ancora le sue porte pronte.
+    - **Confermato dall'utente (2026-09-02)**: dopo questo giro di fix, la
+      cattura di un video YouTube in Firefox "ora sembra funzionare".
+
+30. **Cue "sorgente app" persistite nel file di progetto (2026-09-02)**:
+    richiesto esplicitamente dall'utente subito dopo aver confermato il
+    fix del punto precedente ("mannaggia a te se ha senso salvare, fallo
+    subito"). Nuovo `Cue::appStreamMatchName` (il nome tecnico stabile
+    dello stream, es. "Firefox", copiato da `AudioNode::name` al momento
+    di `addAppStreamCue`) — PERSISTITO in JSON insieme a `isAppStream`,
+    a differenza di `appStreamNodeId`/`appProcessId` (id di sessione, mai
+    salvati). Al caricamento la cue torna con `appStreamNodeId`/`nodeId`
+    a 0 ("non ancora risolta"): `PatchManager::startCueNow` ri-risolve al
+    volo, al momento del Play, cercando tra gli stream applicativi
+    attualmente noti quello con lo stesso `appStreamMatchName` — se non
+    trovato (l'app non è aperta in quel momento), fallisce con un
+    `patchError` invece di partire a vuoto. Ambiguo se più stream con lo
+    stesso nome sono attivi insieme (es. due finestre Firefox): prende il
+    primo, limite accettato — nessuna proprietà PipeWire distingue in modo
+    affidabile due istanze della stessa app. **Non ancora testato
+    dall'utente** (implementato subito dopo la richiesta, build verificata
+    ma nessun giro di salva-chiudi-riapri-carica-play ancora confermato).
+
+31. **Calibrazione automatica del ritardo di output, tramite misura
+    acustica reale (2026-09-02)**: richiesto esplicitamente dall'utente
+    ("mi serve un modo per correggere automaticamente il ritardo, non
+    riesco a farlo dalla ui, calcolalo e applicalo automaticamente").
+    Nessuna proprietà PipeWire espone in modo affidabile la latenza reale
+    di un sink Bluetooth (dipende da codec/dispositivo/condizioni radio,
+    non standardizzata da A2DP — verificato ispezionando le proprietà
+    reali di due casse BT connesse, nessun valore numerico di latenza
+    presente) — confermato con l'utente che l'unico modo per avere un
+    numero vero è misurarlo acusticamente, non stimarlo.
+    - **Meccanismo** (`AudioEngine::calibrateOutputDelay(sinkA, sinkB,
+      micNodeId)`, implementato solo per `PipeWireEngine`/Linux — stub
+      "non implementato" su CoreAudioEngine/WasapiEngine): un breve click
+      di rumore bianco (15ms, inviluppo con fade-in di 2ms per evitare un
+      fronte perfettamente istantaneo) riprodotto sul sink A, poi — un
+      secondo dopo — sullo stesso stream riportato al sink B (un solo
+      generatore riusato in sequenza via `unlinkNodes`/
+      `Impl::createPortLink` diretto: **niente sincronizzazione fra due
+      stream diversi**, scelta deliberata per semplicità/robustezza — il
+      microfono registra in un unico buffer continuo, la differenza si
+      ricava dagli istanti di arrivo misurati nella stessa registrazione,
+      non da un trigger condiviso). `createPortLink` diretto invece del
+      `linkNodes` pubblico: bypassa deliberatamente un eventuale filtro di
+      ritardo già presente sul sink, per non contaminare la misura con un
+      valore già applicato in precedenza.
+    - **Individuazione dei click**: inviluppo RMS a finestre di ~5ms,
+      soglia = 6× il rumore di fondo misurato nel silenzio prima del primo
+      click — sufficiente per un impulso di rumore bianco (fronte molto
+      più netto di un tono puro), non serve una vera cross-correlazione.
+      `deltaMsAtoB = latenza(B) - latenza(A)`: positivo → A è il sink più
+      veloce e va ritardato di quel tanto (B riportato a 0, ora è lui il
+      riferimento); negativo → il contrario. `PatchManager::
+      calibrateOutputDelay` applica il risultato chiamando
+      `setOutputDelayMs` su entrambi i sink (già persistito/esposto in UI
+      come il resto del ritardo manuale).
+    - **UI**: il dialog "Ritardo output" (pulsante "⏱" per riga, vedi
+      punto 28) ha ora anche un `ComboBox` per scegliere il secondo output
+      da confrontare e un pulsante "🎯 Calibra automaticamente" (disabilitato
+      se manca un microfono o se i due output scelti coincidono); il
+      microfono viene scelto in automatico (il primo hardware trovato,
+      niente picker dedicato per ora — praticamente ogni sistema ne ha uno
+      solo). Nuove `PatchManager::microphonesModel`/`calibrationInProgress`/
+      segnale `calibrationResult` per il feedback testuale nel dialog.
+    - **Verificato con un harness standalone e un vero microfono/
+      altoparlante reali (2026-09-02)**, calibrando un sink CONTRO SE
+      STESSO (stesso id per A e B: stesso percorso acustico, quindi il
+      delta atteso è ~0) — risultato: `deltaMs 0 success true`, confermando
+      l'intera catena end-to-end (generazione del click, cambio di
+      collegamento in sequenza, cattura reale dal microfono del laptop,
+      individuazione dei due transienti).
+    - **Bug reale scoperto con un test asimmetrico vero (2026-09-02,
+      stesso giorno)**: l'utente ha riportato "ritardo misurato 0ms e non
+      si calibra" collegando davvero un output Bluetooth diverso
+      dall'interno. Causa sospetta: il click viene sparato SUBITO dopo aver
+      collegato lo stream al sink, ma un sink Bluetooth appena collegato
+      ha un transitorio di "warm-up" del trasporto A2DP (stesso motivo per
+      cui esiste il keepalive — vedi punto 5/19/24) durante il quale il
+      primo audio inviato può non arrivare mai fisicamente all'altoparlante
+      o arrivarci troncato/distorto, facendo fallire la individuazione
+      dell'onset per quel sink. **Fix**: aggiunta un'attesa di 500ms dopo
+      il collegamento e prima di sparare il click, sia per il sink A che
+      per il sink B (simmetrica: si cancella nel calcolo del delta, non
+      distorce la misura relativa). **Non ancora riconfermato dall'utente**
+      dopo il fix — il retest era bloccato da due istanze di bluecue aperte
+      contemporaneamente nello stesso momento (vedi nota già presente più
+      sopra su questo genere di interferenza).
+
+## Bug trovati per revisione statica del codice nei backend Windows/macOS
+(2026-09-02/03), mai testati dal vivo
+
+L'utente non ha un Mac/PC Windows a disposizione in questa sessione
+("trova un modo per beccare i bugs nelle versioni apple e windows"): questi
+sono stati individuati leggendo il codice con attenzione, basandosi su
+comportamento documentato delle rispettive API (non su esecuzione reale —
+vedi la nota in cima a `WasapiEngine.h`/`CoreAudioEngine.h`/
+`AppleBluetoothManager.mm`/`WindowsBluetoothManager.cpp`: nessuno di questi
+file è mai stato compilato/eseguito su hardware reale, solo via CI). Tutti
+corretti, **nessuno verificato dal vivo** — da confermare quando l'utente
+potrà testare su un Mac/PC Windows reale.
+
+- **`main.cpp`: `QT_QPA_PLATFORMTHEME=xdgdesktopportal` applicato senza
+  guardia di piattaforma.** Era impostato incondizionatamente per tutti i
+  sistemi (serve solo per l'integrazione xdg-desktop-portal su Linux), il
+  sospetto principale dietro il primo bug riportato in sessione
+  ("l'app non parte su Windows, nessuna finestra, nessun errore"): un
+  `WIN32_EXECUTABLE` non ha console, quindi anche un warning Qt per un
+  plugin platform-theme inesistente sarebbe stato invisibile, e non è da
+  escludere che la ricerca di quel plugin interferisse con l'inizializzazione
+  QPA. **Fix**: `#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)` attorno
+  alla riga. Aggiunto anche, solo per Windows, un message handler Qt
+  (`qInstallMessageHandler`) che scrive ogni log in
+  `<AppData>/bluecue.log`, per rendere diagnosticabile un futuro fallimento
+  all'avvio senza dover lanciare da terminale (che per un `.exe` senza
+  console richiederebbe comunque aprirlo PRIMA del doppio click).
+- **`WasapiEngine.cpp`: tre thread worker mai inizializzano COM sul thread
+  proprio.** `CoInitializeEx` viene chiamato una sola volta, sul thread che
+  chiama `start()`, ma il thread di `fileStreamWorkerLoop` (riproduzione
+  file), il thread di `setKeepAliveEnabled` e quello di `identifySink`
+  girano su thread NUOVI creati con `QThread::create` che non chiamano mai
+  `CoInitializeEx` per conto proprio — obbligatorio per ogni thread che
+  invoca API COM, per documentazione Microsoft. `createRenderTarget`
+  all'interno di questi due ultimi thread chiama `IMMDevice::Activate`
+  (una vera creazione COM) da un thread non inizializzato: fallisce con
+  `CO_E_NOTINITIALIZED`, intercettato silenziosamente da un semplice
+  `if (!target) return;` — keepalive e identify-sink smetterebbero di
+  funzionare senza alcun errore visibile. **Fix**: `CoInitializeEx`/
+  `CoUninitialize` aggiunti attorno al corpo di tutti e tre.
+- **`WasapiEngine.cpp`: `EndpointNotificationClient` mai deregistrata.**
+  `stop()` rilasciava l'enumerator senza prima chiamare
+  `UnregisterEndpointNotificationCallback` — una notifica di
+  aggiunta/rimozione device arrivata dopo `stop()`/durante la distruzione
+  avrebbe invocato una callback dentro un `Impl` già smontato. **Fix**:
+  nuovo campo `Impl::notificationClient`, deregistrato e rilasciato
+  esplicitamente in `stop()` prima di rilasciare l'enumerator.
+- **`WindowsBluetoothManager.cpp`: race sull'HANDLE del radio Bluetooth tra
+  `connectDevice`/`disconnectDevice` e `refreshDevices()`.** Il thread
+  asincrono di connessione cattura per valore lo stesso `HANDLE` tenuto in
+  `Impl::recordsByAddress`; se `refreshDevices()` viene richiamato nel
+  frattempo (bottone "Aggiorna" nel dialog Bluetooth, o anche solo
+  riaprendo il dialog — `onOpened: blueZManager.refreshDevices()` in
+  Main.qml), `clearRadioHandles()` chiude quell'HANDLE (magari
+  riassegnato nel frattempo dall'OS ad altro) MENTRE il thread in
+  background lo sta ancora per usare in `BluetoothSetServiceState`.
+  Raggiungibile con un click "Connetti" seguito a ruota da un refresh, non
+  uno scenario raro. **Fix**: `DuplicateHandle` chiamato in modo sincrono
+  (nessuno yield possibile) prima di avviare il thread — il thread lavora
+  su una copia indipendente dell'handle, immune a cosa faccia
+  `refreshDevices()` nel frattempo, e la chiude lui stesso a lavoro
+  finito.
+- **`CoreAudioEngine.cpp`: `kAudioQueueProperty_CurrentDevice` impostata su
+  una AudioQueue già avviata.** `createFileStream` crea la coda e la avvia
+  SUBITO (`AudioQueueStart`), prima ancora che esista un routing verso un
+  output — il primo collegamento arriva sempre dopo, quando l'utente
+  patcha il cue su un output. `syncAggregateForProducer`, nel ramo "nuovo
+  aggregate", reimposta `CurrentDevice` sulla coda del file stream SENZA
+  fermarla prima — ma questa property è documentata da Apple come
+  impostabile solo a coda ferma. Senza controllo del valore di ritorno,
+  l'effetto sarebbe silenzioso: il cue continuerebbe a suonare sul device
+  di default invece che sull'aggregate appena creato, cioè il routing non
+  si applicherebbe MAI al primo collegamento di un cue appena aggiunto —
+  l'equivalente CoreAudio del problema WirePlumber già trovato su Linux
+  (vedi punto 29). **Fix**: `AudioQueueStop`/`AudioQueueStart` attorno alla
+  `AudioQueueSetProperty`. I percorsi keepalive/identify-sink impostano già
+  `CurrentDevice` PRIMA di avviare la coda, quindi non sono affetti.
+- **`CoreAudioEngine.cpp`: il listener di cambio-device non viene mai
+  davvero rimosso.** `stop()` chiamava `AudioObjectRemovePropertyListenerBlock`
+  con un NUOVO block literal vuoto, diverso (per identità, non solo per
+  contenuto) da quello passato a `AudioObjectAddPropertyListenerBlock` in
+  `start()` — l'API CoreAudio deregistra per identità del block, quindi
+  quella chiamata non deregistrava nulla: un cambio hardware dopo lo
+  stop/durante la distruzione avrebbe invocato una callback dentro un
+  `Impl` già smontato (stesso genere di bug del punto WASAPI sopra).
+  **Fix**: il block è ora tenuto in vita (`Block_copy`, necessario perché
+  questo è un file `.cpp` puro, senza ARC, quindi un block literal locale
+  non sopravvive di suo oltre `start()`) in `Impl::deviceListChangeBlock` e
+  riusato identico per la rimozione in `stop()`.
+
+**Nessuna di queste modifiche è stata compilata**: nessun SDK
+Windows/macOS è disponibile in questo ambiente Linux — verificate solo per
+coerenza sintattica e comportamento documentato delle rispettive API. Da
+compilare/testare alla prima occasione su hardware reale.
+
 ## Cosa NON funziona ancora (TODO noti)
 
 1. **Formati compressi (MP3) nella riproduzione file**: **nota corretta
@@ -805,11 +1242,16 @@ qml/
 3. **`BlueZManager::refreshDevices()`**: stub, non fa ancora il parsing di
    `org.freedesktop.DBus.ObjectManager.GetManagedObjects()` su
    `org.bluez`. Serve per popolare la lista dispositivi accoppiati.
-4. **`createVirtualSink`**: carica il modulo `libpipewire-module-loopback`
-   ma non traccia ancora il `pw_impl_module*` risultante, quindi
-   `removeVirtualSink` è no-op e `ownedVirtualSinkIds` non viene mai
-   popolato (i sink virtuali non vengono ancora distinti dai sink fisici
-   nella UI).
+4. ~~`createVirtualSink` non traccia il `pw_impl_module*`~~ — **risolto
+   2026-09-02** (necessario per i sink di cattura del punto 29): ora
+   tracciato in `Impl::virtualSinks` (correlato per nome, come i file
+   stream), `removeVirtualSink` distrugge davvero il modulo, e
+   `ownedVirtualSinkIds`/`Kind::VirtualSink` vengono popolati per davvero
+   (prima il controllo era per nodeId, impossibile da soddisfare in tempo
+   utile). Resta comunque vero che nessun sink virtuale creato con questa
+   funzione compare ancora come voce scelta dall'utente in colonna
+   Output — l'unico uso attuale è interno (sink di cattura per le cue
+   "sorgente app").
 5. **Abbinamento canali per ordine di scoperta** (vedi punto 2 sopra): da
    rendere robusto leggendo `PW_KEY_AUDIO_CHANNEL` dalla porta invece di
    fare affidamento sull'ordine di arrivo delle callback.
@@ -849,6 +1291,11 @@ qml/
    sottofondo di una zona (tipicamente minuti) è trascurabile; se in futuro
    servissero file molto lunghi (ore) andrebbe rivista con una variante a
    streaming con buffer circolare invece del caricamento completo.
+10. ~~Catturare stream audio di altre app (es. Firefox) come sorgente in
+    playlist~~ — **implementato, vedi punto 29** più sopra
+    ("sposta", non "duplica", con presa di controllo diretta del link
+    invece della sola metadata `target.object`, rivelatasi inaffidabile in
+    più di un caso). Non ancora testato dall'utente nella UI reale.
 
 ## Bug risolti in questa chat (per riferimento, se riappaiono pattern simili)
 

@@ -25,6 +25,11 @@ ColumnLayout {
     property bool showAllPatches: true
 
     signal addRequested()
+    // Aggiungi una sorgente app (Firefox, ecc.) invece di un file — vedi
+    // PatchManager::addAppStreamCue. Distinto da addRequested() perché
+    // richiede scegliere da un elenco di stream in esecuzione, non un
+    // FileDialog.
+    signal addAppStreamRequested()
     signal removeRequested(int index)
     signal configureRequested(int index)
     signal renameRequested(int index, string currentName)
@@ -65,6 +70,25 @@ ColumnLayout {
                 verticalAlignment: Text.AlignVCenter
             }
             onClicked: column.addRequested()
+        }
+
+        // Aggiunge una sorgente app in esecuzione (Firefox, ecc.) invece di
+        // un file — richiesto esplicitamente dall'utente. Icona diversa
+        // (cuffie) per non confonderlo con "+" (che apre un FileDialog).
+        Button {
+            id: addAppStreamButton
+            text: "🎧+"
+            implicitWidth: 40
+            implicitHeight: 32
+            font.pixelSize: 14
+            contentItem: Text {
+                text: addAppStreamButton.text
+                font: addAppStreamButton.font
+                color: "white"
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+            }
+            onClicked: column.addAppStreamRequested()
         }
     }
 
@@ -142,6 +166,7 @@ ColumnLayout {
                            : cueDelegate.cue && cueDelegate.cue.nodeId > 0 && cueDelegate.cue.paused ? "⏸  "
                            : cueDelegate.cue && cueDelegate.cue.nodeId > 0 ? "▶  "
                            : "")
+                          + (cueDelegate.cue && cueDelegate.cue.isAppStream ? "🎧 " : "")
                           + (cueDelegate.cue ? cueDelegate.cue.displayName : "")
                 selected: cueDelegate.cue ? (cueDelegate.cue.nodeId > 0 || cueDelegate.cue.waitingToStart) : false
                 armed: index === column.armedIndex && !(cueDelegate.cue && (cueDelegate.cue.nodeId > 0 || cueDelegate.cue.waitingToStart))

@@ -25,6 +25,7 @@ public:
         KindRole,
         BatteryPercentageRole,
         MutedRole,
+        DelayMsRole,
     };
 
     explicit PortModel(Direction direction, QObject *parent = nullptr);
@@ -50,6 +51,13 @@ public:
     // nodo (vedi PatchManager), quindi va spesso applicato dopo che il nodo
     // esiste già nel modello, non solo alla creazione.
     void updateBatteryPercentage(uint32_t nodeId, int percentage);
+
+    // Aggiorna solo delayMs di un nodo già presente (ritardo di output
+    // impostato dall'utente, vedi PatchManager::setOutputDelayMs) — non
+    // letto da PipeWire, quindi va applicato esplicitamente sia alla prima
+    // scoperta del nodo (ripristino di un valore persistito) sia ad ogni
+    // cambio dal pannello Impostazioni.
+    void updateDelayMs(uint32_t nodeId, int delayMs);
 
     // Sposta il nodo dalla posizione fromIndex a toIndex (riordino manuale
     // via i pulsanti ▲/▼ della colonna Output/Playlist) — puro riordino

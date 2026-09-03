@@ -13,6 +13,7 @@
 
 class AudioEngine;
 class BluetoothManager;
+class QTimer;
 
 // Rappresenta una singola connessione attiva nella griglia di routing:
 // un input collegato a un output, con l'id del link PipeWire risultante.
@@ -122,6 +123,57 @@ struct Cue
     bool inPostWait = false;        // true mentre si attende postWaitSeconds prima dello smontaggio vero
     bool paused = false;            // sostituisce il vecchio flag globale: ora ogni cue si mette in pausa indipendentemente
     QString pendingStreamName;      // nome dello stream file in attesa che PipeWire assegni il nodeId (correlazione robusta con nodeAdded, vedi costruttore)
+
+    // --- Sorgente "app" (Firefox, ecc.) invece di un file — vedi
+    // PatchManager::addAppStreamCue. filePath resta vuoto per queste cue:
+    // non c'è nulla da decodificare, l'audio arriva già pronto da
+    // un'applicazione in esecuzione, "spostato" nella patch bay tramite un
+    // sink virtuale di cattura invece che duplicato. loopCount/reverse non
+    // hanno alcun effetto per queste cue (nessuno stream file su cui
+    // agire), ma restano innocui se toccati dalla UI (i relativi metodi
+    // dell'engine no-oppano silenziosamente su un nodeId che non è un file
+    // stream). preWait/durata/postWait invece si applicano regolarmente,
+    // esattamente come per una cue file: sono generici, non dipendono dal
+    // tipo di sorgente.
+    bool isAppStream = false;
+    // nodeId dello stream applicativo (Kind::AppStream) che questa cue sta
+    // catturando — stabile per tutta la durata della cattura (a differenza
+    // di nodeId, che è quello del NOSTRO sink di cattura, la "sorgente" da
+    // cui si collegano gli output).
+    uint32_t appStreamNodeId = 0;
+    // PID del processo che possiede appStreamNodeId (AudioNode::
+    // appProcessId), copiato al momento di addAppStreamCue — usato per
+    // "seguire" l'app quando il suo stream sparisce e ne appare uno nuovo
+    // dallo stesso processo (vedi il commento in nodeRemoved/
+    // handleAppStreamNode): comune con client pipewire-pulse (es. Firefox),
+    // che possono ricreare il proprio stream più volte durante una
+    // riproduzione continua e ininterrotta dal punto di vista dell'utente.
+    // 0 = sconosciuto (il client non lo espone): in quel caso non è
+    // possibile alcun aggancio automatico, la cattura si ferma e basta se
+    // lo stream sparisce.
+    uint32_t appProcessId = 0;
+    // Nome del sink virtuale di cattura creato per questa cue
+    // ("bluecue.appcapture.<appStreamNodeId>", vedi
+    // PatchManager::beginAppStreamCapture) — usato per correlare il nodeId
+    // una volta scoperto (captureSinkNodeId resta 0 fino ad allora, stesso
+    // principio di pendingStreamName) e per rimuovere il nome da
+    // m_appCaptureSinkNames alla fine della cattura.
+    QString captureSinkName;
+    // nodeId del sink di cattura una volta noto — identico a nodeId (che
+    // resta il campo generico usato da tutto il resto del routing), tenuto
+    // qui separatamente solo per poter chiamare
+    // PipeWireEngine::removeVirtualSink alla fine senza ambiguità.
+    uint32_t captureSinkNodeId = 0;
+    // Nome tecnico stabile (AudioNode::name, es. "Firefox") dello stream
+    // scelto al momento di addAppStreamCue — PERSISTITO nel file di
+    // progetto (a differenza di appStreamNodeId, un id di sessione).
+    // Usato per ri-risolvere a un nodeId live al momento del Play se la
+    // cue è stata ricaricata da un progetto (appStreamNodeId parte da 0 in
+    // quel caso) — vedi PatchManager::startCueNow. Ambiguo se più stream
+    // dello stesso nome sono attivi insieme (es. due finestre Firefox):
+    // limite accettato, nessun modo migliore di distinguerli con le sole
+    // proprietà che PipeWire espone per uno stream applicativo.
+    QString appStreamMatchName;
 };
 
 // Orchestratore della patch bay: possiede i due PortModel (input/output)
@@ -143,6 +195,18 @@ class PatchManager : public QObject
     Q_PROPERTY(QString currentProjectPath READ currentProjectPath NOTIFY currentProjectPathChanged)
     Q_PROPERTY(bool keepAliveEnabled READ keepAliveEnabled WRITE setKeepAliveEnabled NOTIFY keepAliveEnabledChanged)
     Q_PROPERTY(uint identifyingSinkId READ identifyingSinkId NOTIFY identifyingSinkIdChanged)
+    // Stream di riproduzione di altre applicazioni attualmente in
+    // esecuzione (Firefox, VLC, ecc. — Kind::AppStream), selezionabili per
+    // "spostarli" nella patch bay come una cue (vedi addAppStreamCue). Non
+    // include mai i nostri stessi sink di cattura (filtrati per nome).
+    Q_PROPERTY(QVariantList appStreamsModel READ appStreamsModel NOTIFY appStreamsChanged)
+    // Microfoni hardware disponibili (per calibrateOutputDelay), come
+    // QVariantList di {nodeId, description}.
+    Q_PROPERTY(QVariantList microphonesModel READ microphonesModel NOTIFY microphonesChanged)
+    // true mentre una calibrazione (vedi calibrateOutputDelay) è in corso
+    // — la UI la usa per disabilitare un nuovo avvio e mostrare un
+    // indicatore di progresso durante i ~2.3s della misura.
+    Q_PROPERTY(bool calibrationInProgress READ calibrationInProgress NOTIFY calibrationStateChanged)
     // Parametri del ping keepalive, regolabili dal menu Impostazioni e
     // persistiti tra un avvio e l'altro — richiesto esplicitamente
     // dall'utente per poter sperimentare durata/ampiezza/frequenza senza
@@ -217,6 +281,20 @@ public:
     // Aggiunge un input microfono, scegliendo tra le sorgenti hardware
     // rilevate da PipeWire (es. scheda audio USB, mic integrato).
     Q_INVOKABLE void addMicrophoneInput(uint32_t hardwareSourceId);
+
+    // Aggiunge alla playlist una cue che, quando avviata (playCueAt, come
+    // una qualunque traccia), "sposta" l'audio dello stream applicativo
+    // indicato (appStreamNodeId, uno di quelli in appStreamsModel) nella
+    // patch bay: crea un sink virtuale di cattura dedicato e reindirizza lì
+    // lo stream con PipeWireEngine::setStreamTarget, invece di lasciarlo
+    // sull'uscita di sistema di default — richiesto esplicitamente
+    // dall'utente ("vorrei poter aggiungere anche gli stream audio come
+    // fonte nella tracklist, firefox o altri stream"), con "sposta" invece
+    // di "duplica" scelto esplicitamente (l'alternativa duplicherebbe
+    // l'audio anche sull'uscita originale). Non aggiunge subito una cue
+    // "live": resta in coda (nodeId 0) finché non viene avviata, esattamente
+    // come una traccia file appena aggiunta.
+    Q_INVOKABLE void addAppStreamCue(uint32_t appStreamNodeId);
 
     // --- Progetti (playlist salvata su file, menu File) ---
 
@@ -427,6 +505,36 @@ public:
     // playlist. Nickname vuoto = torna alla descrizione PipeWire originale.
     Q_INVOKABLE void setOutputNickname(uint32_t nodeId, const QString &nickname);
 
+    // Imposta il ritardo (millisecondi, 0 = nessuno) applicato all'audio
+    // instradato verso questo sink Output — richiesto esplicitamente
+    // dall'utente per compensare la latenza maggiore di un output
+    // Bluetooth (trasporto+decodifica A2DP) quando la stessa traccia suona
+    // contemporaneamente sull'audio interno e su una cassa BT: ritardando
+    // l'output più veloce (tipicamente quello interno) i due tornano in
+    // sincrono. Persistito via QSettings per nome stabile del sink (come
+    // setOutputNickname), non nel file di progetto: è una caratteristica
+    // del dispositivo fisico (la sua catena audio interna), non della
+    // playlist. Applicato subito al motore (PipeWireEngine::
+    // setOutputDelayMs); sui backend che non lo supportano ancora
+    // (CoreAudioEngine/WasapiEngine) il motore stesso segnala l'errore via
+    // engineError.
+    Q_INVOKABLE void setOutputDelayMs(uint32_t nodeId, int delayMs);
+
+    // Misura acusticamente la differenza di latenza reale tra due output
+    // (richiesto esplicitamente dall'utente: non riusciva a trovare a
+    // orecchio il valore giusto dalla UI manuale) e applica da sola il
+    // ritardo risultante — vedi AudioEngine::calibrateOutputDelay per il
+    // meccanismo (un click di test in sequenza su ciascun output,
+    // registrato con micNodeId). Il risultato arriva in modo asincrono
+    // (~2.3s) tramite calibrationResult.
+    Q_INVOKABLE void calibrateOutputDelay(uint32_t nodeIdA, uint32_t nodeIdB, uint32_t micNodeId);
+
+    bool calibrationInProgress() const { return m_calibrationInProgress; }
+
+    // Microfoni hardware attualmente scoperti, come QVariantList di
+    // {nodeId, description} — per il picker di calibrateOutputDelay.
+    QVariantList microphonesModel() const;
+
     // --- Routing ---
 
     // Crea (o rimuove, se già esistente) la connessione tra un input e un
@@ -449,6 +557,10 @@ public:
     QVariantList cueModel() const;
     int armedCueIndex() const { return m_armedIndex; }
 
+    // Stream applicativi attualmente selezionabili, come QVariantList di
+    // {nodeId, description} — vedi addAppStreamCue.
+    QVariantList appStreamsModel() const;
+
 signals:
     void connectionsChanged();
     void cuesChanged();
@@ -458,6 +570,14 @@ signals:
     void keepAliveEnabledChanged();
     void keepAlivePingSettingsChanged();
     void identifyingSinkIdChanged();
+    void appStreamsChanged();
+    void microphonesChanged();
+    void calibrationStateChanged();
+    // Esito finale (successo o fallimento con motivo) di
+    // calibrateOutputDelay, per un messaggio nella UI — il valore
+    // applicato si vede già riflesso nel pulsante "⏱" del sink coinvolto,
+    // non serve ripeterlo qui.
+    void calibrationResult(bool success, const QString &message);
     void patchError(const QString &message);
 
 private:
@@ -479,6 +599,34 @@ private:
     // costruttore), lo aggancia al keepalive. Condiviso dagli handler di
     // nodeAdded e nodeUpdated per evitare di duplicare questa logica.
     void handleSinkNode(const AudioNode &node);
+    // Traccia un nodo Kind::AppStream appena scoperto/scomparso in
+    // m_availableAppStreams (escludendo i nostri stessi sink di cattura,
+    // riconosciuti per nome — vedi kAppCaptureSinkPrefix nel .cpp), per
+    // popolare il picker di addAppStreamCue.
+    void handleAppStreamNode(const AudioNode &node);
+    // Cerca, tra gli stream applicativi attualmente scoperti
+    // (m_availableAppStreams), uno con questo appProcessId diverso da
+    // excludeNodeId — usato per "seguire" un'app quando il suo stream
+    // sparisce e ne appare uno nuovo dallo stesso processo (vedi il
+    // commento su Cue::appProcessId). 0 se nessun sostituto disponibile
+    // (appProcessId 0 non trova mai nulla: nessun aggancio automatico
+    // possibile senza un PID noto).
+    uint32_t findReplacementAppStreamNodeId(uint32_t appProcessId, uint32_t excludeNodeId) const;
+    // Avvia davvero la cattura di una cue "sorgente app" (startCueNow la
+    // chiama al posto di createFileStream quando Cue::isAppStream):
+    // crea il sink virtuale di cattura dedicato; la correlazione del suo
+    // nodeId (e il conseguente setStreamTarget) avviene in modo asincrono
+    // nel gestore di nodeAdded, stesso schema di pendingStreamName per le
+    // cue file.
+    void beginAppStreamCapture(int index);
+    // Muta/riattiva la cue in riproduzione (play/pause globali,
+    // handleCueNaturalEnd): per una cue file richiama
+    // PipeWireEngine::setFileStreamActive, per una cue "sorgente app"
+    // reindirizza/rimuove il reindirizzamento dello stream applicativo
+    // (silenzio ottenuto smettendo di alimentare il sink di cattura,
+    // invece di una vera pausa — non esiste un "pausa" per uno stream che
+    // non controlliamo noi).
+    void setCueLiveActive(Cue &cue, bool active);
     // Collega la traccia cueIndex (deve essere già in riproduzione, nodeId
     // > 0) agli output "voluti": tutti quelli in Cue::desiredOutputNames
     // normalmente, oppure solo quello in rotateOutputIndex se
@@ -536,6 +684,9 @@ private:
         double preWaitSeconds = 0.0;
         double durationSeconds = 0.0;
         double postWaitSeconds = 0.0;
+        bool isAppStream = false;
+        uint32_t appStreamNodeId = 0;
+        QString appStreamMatchName;
     };
     QVector<CueSnapshotEntry> snapshotCues() const;
     // Riconcilia m_cues con lo snapshot: le cue ancora presenti (stesso id)
@@ -586,6 +737,37 @@ private:
     // dispositivo. Persistito via QSettings (non nel file di progetto: è
     // legato al dispositivo fisico, non a una playlist).
     QMap<QString, QString> m_outputNicknames;
+    // Nome stabile -> ritardo (ms) impostato dall'utente per questo sink
+    // (vedi setOutputDelayMs), stesso schema di persistenza per nome di
+    // m_outputNicknames. Solo le voci >0 sono davvero utili (assenza dalla
+    // mappa equivale a 0/nessun ritardo), ma non si toglie una voce
+    // riportata a 0 esplicitamente: serve comunque a distinguere "utente ha
+    // scelto 0" da "mai impostato", innocuo in entrambi i casi.
+    QMap<QString, int> m_outputDelaysMs;
+    // Stream applicativi (Kind::AppStream) attualmente scoperti,
+    // selezionabili da addAppStreamCue — esposti a QML via appStreamsModel.
+    QVector<AudioNode> m_availableAppStreams;
+    // Sorgenti hardware (microfono/line-in, Kind::Source con nome che NON
+    // inizia per "bluecue." — quel prefisso è sempre nostro: file stream,
+    // stream di calibrazione, ecc., mai un dispositivo reale) —
+    // selezionabili in calibrateOutputDelay per registrare il test
+    // acustico.
+    QVector<AudioNode> m_availableMicrophones;
+    bool m_calibrationInProgress = false;
+    // Nomi dei sink virtuali di cattura creati da noi (uno per cue
+    // "sorgente app" attiva) — usato per impedire che vengano MAI trattati
+    // come un output normale (colonna Output) quando li scopriamo tramite
+    // il discovery generico di PipeWire, che non sa distinguerli da un
+    // qualunque altro sink Audio/Sink.
+    QSet<QString> m_appCaptureSinkNames;
+    // Riafferma periodicamente il reindirizzamento (setStreamTarget) di
+    // ogni cue "sorgente app" attualmente in cattura — auto-recovery
+    // richiesta esplicitamente dall'utente: il target impostato sulla
+    // metadata "default" di PipeWire è un suggerimento applicato alla
+    // prossima rivalutazione del routing da parte del session manager, non
+    // una garanzia permanente, quindi riproporlo di tanto in tanto è più
+    // robusto che fidarsi ciecamente di un singolo tentativo iniziale.
+    QTimer *m_appStreamReassertTimer;
     // Nome stabile -> ultima descrizione PipeWire leggibile vista per quel
     // dispositivo, MAI rimossa quando il nodo scompare (a differenza di
     // m_outputNodeDescriptions, svuotata da nodeRemoved): una cassa

@@ -8,6 +8,57 @@
 #include "audio/PatchManager.h"
 #include "bluetooth/BluetoothManager.h"
 
+#if defined(Q_OS_WIN)
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QStandardPaths>
+#include <QTextStream>
+
+namespace {
+// Un eseguibile WIN32_EXECUTABLE non ha una console: qDebug()/qWarning()
+// (incluso qualunque errore di avvio) sparisce nel nulla, esattamente come
+// nella segnalazione dell'utente "non parte, nessuna finestra, nessun
+// errore visibile" — su Linux lo stesso problema non esiste, Qt invia i
+// messaggi direttamente al journal quando rileva systemd (vedi
+// PROJECT_STATUS). Scrive SEMPRE ogni messaggio anche in un file di log
+// accanto ai dati dell'app (stessa cartella di QSettings), per poter
+// diagnosticare un fallimento senza dover per forza lanciare da un
+// terminale — cosa che, per questo eseguibile, richiederebbe comunque un
+// terminale già aperto PRIMA di lanciarlo (non ovvio per un utente che fa
+// doppio click sull'icona).
+void windowsFileMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
+{
+    static QFile logFile;
+    if (!logFile.isOpen()) {
+        const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        QDir().mkpath(dir);
+        logFile.setFileName(dir + QStringLiteral("/bluecue.log"));
+        logFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
+    }
+    if (!logFile.isOpen())
+        return;
+
+    const char *typeStr = "INFO";
+    switch (type) {
+    case QtDebugMsg: typeStr = "DEBUG"; break;
+    case QtInfoMsg: typeStr = "INFO"; break;
+    case QtWarningMsg: typeStr = "WARNING"; break;
+    case QtCriticalMsg: typeStr = "CRITICAL"; break;
+    case QtFatalMsg: typeStr = "FATAL"; break;
+    }
+
+    QTextStream stream(&logFile);
+    stream << QDateTime::currentDateTime().toString(Qt::ISODate) << " [" << typeStr << "] "
+           << msg;
+    if (context.file)
+        stream << " (" << context.file << ':' << context.line << ')';
+    stream << Qt::endl;
+    stream.flush();
+}
+}
+#endif
+
 // Selezione del backend a compile-time: stessa interfaccia (AudioEngine/
 // BluetoothManager, vedi src/audio/AudioEngine.h e
 // src/bluetooth/BluetoothManager.h), implementazione diversa per
@@ -32,6 +83,14 @@ using PlatformBluetoothManager = BlueZManager;
 
 int main(int argc, char *argv[])
 {
+#if defined(Q_OS_WIN)
+    // Installato per PRIMA COSA: qualunque qDebug()/qWarning() successivo
+    // (compreso un eventuale errore durante la costruzione di
+    // QGuiApplication stessa) finisce nel file di log invece che sparire
+    // in una console inesistente — vedi la definizione più sopra.
+    qInstallMessageHandler(windowsFileMessageHandler);
+#endif
+
     // Il file picker (QtQuick.Dialogs FileDialog) risultava pressoché
     // illeggibile: verificato (find sui plugin installati) che questo
     // sistema usa il proprio FileDialog QML integrato di Qt invece del vero
@@ -47,7 +106,22 @@ int main(int argc, char *argv[])
     // NON tocca lo stile/rendering dei nostri Control QtQuick — è un
     // meccanismo completamente separato (integrazione col desktop, non
     // rendering) — va impostato PRIMA di costruire QGuiApplication.
+    //
+    // SOLO LINUX: "xdgdesktopportal" è un plugin di platform theme di Qt
+    // specifico per l'integrazione xdg-desktop-portal/D-Bus, che non
+    // esiste affatto su macOS/Windows. Era impostato qui SENZA alcuna
+    // guardia di piattaforma — bug quasi certo dietro la segnalazione
+    // dell'utente "l'app non parte per niente su Windows" (nessuna
+    // finestra, nessun errore visibile): un WIN32_EXECUTABLE non ha
+    // console, quindi anche un semplice avviso di Qt per un platform theme
+    // introvabile sarebbe stato invisibile, e non è da escludere che la
+    // ricerca di un plugin inesistente abbia impedito la corretta
+    // inizializzazione QPA su quella piattaforma. Mai potuto verificare
+    // direttamente (nessun ambiente Windows disponibile in questa sessione
+    // di sviluppo) — da confermare quando l'utente può ritestare.
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
     qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+#endif
 
     // NOTA: qui era stato impostato QQuickStyle::setStyle("Basic") per
     // provare a risolvere in un colpo solo i vari bug di testo invisibile

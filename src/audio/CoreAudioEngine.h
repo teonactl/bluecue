@@ -59,6 +59,16 @@ public:
     void setKeepAliveEnabled(uint32_t sinkNodeId, bool enabled) override;
     void identifySink(uint32_t sinkNodeId) override;
     void setSinkMuted(uint32_t sinkNodeId, bool muted) override;
+    // Non ancora implementato su macOS (vedi PipeWireEngine per il backend
+    // Linux, l'unico su cui è stato realizzato finora) — no-op che segnala
+    // l'errore via engineError invece di fallire silenziosamente.
+    void setOutputDelayMs(uint32_t sinkNodeId, int delayMs) override;
+    // Non ancora implementato su macOS (nessun equivalente diretto del
+    // meccanismo target.object di WirePlumber usato dal backend Linux).
+    void setStreamTarget(uint32_t streamNodeId, uint32_t targetSinkNodeId, const QString &targetSinkName) override;
+    void clearStreamTarget(uint32_t streamNodeId) override;
+    // Non ancora implementato su macOS.
+    void calibrateOutputDelay(uint32_t sinkNodeIdA, uint32_t sinkNodeIdB, uint32_t micNodeId) override;
 
     void setKeepAlivePingFrequency(double hz) override;
     void setKeepAlivePingAmplitude(float amplitude) override;

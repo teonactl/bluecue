@@ -89,6 +89,44 @@ public:
     // Muta/smuta il sink indicato.
     virtual void setSinkMuted(uint32_t sinkNodeId, bool muted) = 0;
 
+    // Applica un ritardo (millisecondi, 0 = nessuno) all'audio instradato
+    // verso questo sink, per compensare la latenza maggiore di un altro
+    // output (tipicamente Bluetooth) quando la stessa traccia suona su
+    // entrambi in contemporanea. Effetto immediato sui collegamenti già
+    // attivi verso questo sink. Backend che non supportano ancora questa
+    // funzione possono limitarsi a segnalare l'errore via engineError.
+    virtual void setOutputDelayMs(uint32_t sinkNodeId, int delayMs) = 0;
+
+    // Reindirizza lo stream di riproduzione di un'altra applicazione
+    // (nodeId di un nodo Kind::AppStream) verso il sink indicato,
+    // "spostando" il suo audio nella patch bay invece di lasciarlo
+    // sull'uscita di sistema di default. targetSinkNodeId e targetSinkName
+    // devono riferirsi allo stesso sink (id live e nome stabile): il primo
+    // per il collegamento diretto delle porte, il secondo per la metadata
+    // di routing del session manager. Va ripetuto periodicamente
+    // (auto-recovery) finché la cattura resta attiva — non è garantito che
+    // resti collegato per sempre da un singolo tentativo. Nessun effetto
+    // se lo stream o il sink target non esistono (più).
+    virtual void setStreamTarget(uint32_t streamNodeId, uint32_t targetSinkNodeId, const QString &targetSinkName) = 0;
+
+    // Rimuove il reindirizzamento impostato da setStreamTarget, riportando
+    // lo stream al routing di default del sistema — usato quando una cattura
+    // viene interrotta (rimozione della cue dalla playlist).
+    virtual void clearStreamTarget(uint32_t streamNodeId) = 0;
+
+    // Misura acusticamente la differenza di latenza reale tra due sink
+    // (richiesto esplicitamente dall'utente: non riusciva a trovare a
+    // orecchio il ritardo giusto dalla UI) riproducendo un breve click su
+    // ciascuno in sequenza e registrandolo con il microfono indicato,
+    // invece di stimarlo — nessuna proprietà PipeWire espone in modo
+    // affidabile la latenza reale di un sink Bluetooth (dipende da
+    // codec/dispositivo/condizioni radio). Asincrona (~2.3s): il risultato
+    // arriva via calibrationFinished. Il filtro di ritardo eventualmente
+    // già presente su uno dei due sink viene bypassato durante la misura
+    // (link diretto al sink reale), per non contaminare la misura con un
+    // ritardo già applicato in precedenza.
+    virtual void calibrateOutputDelay(uint32_t sinkNodeIdA, uint32_t sinkNodeIdB, uint32_t micNodeId) = 0;
+
     // --- Parametri del ping keepalive, regolabili a runtime (menu
     // Impostazioni) senza dover ricompilare.
     virtual void setKeepAlivePingFrequency(double hz) = 0;
@@ -109,4 +147,15 @@ signals:
     // ripartenza dall'altro estremo), incluso l'ultimo giro prima di un
     // eventuale fileStreamFinished.
     void fileStreamLooped(uint32_t nodeId);
+
+    // Esito di calibrateOutputDelay(). deltaMsAtoB = latenza(B) -
+    // latenza(A) in millisecondi: se positivo, sinkNodeIdA è quello più
+    // veloce e va ritardato di deltaMsAtoB; se negativo, è sinkNodeIdB a
+    // dover essere ritardato di -deltaMsAtoB (l'altro va riportato a 0 —
+    // decisione lasciata a PatchManager, che è già proprietario di
+    // setOutputDelayMs/della persistenza). success=false se il click non è
+    // stato rilevato chiaramente nella registrazione (rumore ambientale,
+    // microfono troppo lontano, ecc.), message ne spiega il motivo.
+    void calibrationFinished(uint32_t sinkNodeIdA, uint32_t sinkNodeIdB, int deltaMsAtoB,
+                              bool success, const QString &message);
 };

@@ -182,6 +182,13 @@ struct WasapiEngine::Impl
     };
     QMap<uint32_t, std::shared_ptr<KeepAliveStream>> keepAliveStreams;
 
+    // Mai deregistrata in una prima stesura: senza tenerne un riferimento,
+    // stop() non poteva chiamare UnregisterEndpointNotificationCallback
+    // prima di rilasciare l'enumerator, lasciando la callback COM
+    // potenzialmente invocabile da un dispositivo appena rimosso/aggiunto
+    // dopo che Impl è già in fase di distruzione.
+    IMMNotificationClient *notificationClient = nullptr;
+
     QString deviceIdFor(uint32_t nodeId) const
     {
         QMutexLocker locker(&mutex);
@@ -343,6 +350,16 @@ private:
 namespace {
 void fileStreamWorkerLoop(WasapiEngine::Impl *impl, WasapiEngine::Impl::FileStreamState *state)
 {
+    // Ogni thread che invoca metodi COM (qui: GetCurrentPadding/GetBuffer/
+    // ReleaseBuffer/Stop su IAudioClient/IAudioRenderClient, anche se le
+    // interfacce sono state create da un altro thread in linkNodes()) deve
+    // inizializzare COM su se stesso — non basta che l'abbia fatto il thread
+    // chiamante di createFileStream/linkNodes. Omesso in una prima stesura
+    // mai eseguita su Windows reale: causa quasi certa di riproduzione
+    // silenziosamente muta (chiamate che falliscono con CO_E_NOTINITIALIZED)
+    // o di comportamento non definito, non di un crash sempre riproducibile.
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
     const int channels = state->channelCount;
     const int64_t totalFrames = channels > 0 ? static_cast<int64_t>(state->samples.size() / channels) : 0;
 
@@ -417,9 +434,14 @@ void fileStreamWorkerLoop(WasapiEngine::Impl *impl, WasapiEngine::Impl::FileStre
         }
     }
 
-    QMutexLocker locker(&state->targetsMutex);
-    for (auto &target : state->renderTargets)
-        target->client->Stop();
+    {
+        QMutexLocker locker(&state->targetsMutex);
+        for (auto &target : state->renderTargets)
+            target->client->Stop();
+    }
+
+    if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE)
+        CoUninitialize();
 }
 
 // Crea e avvia un IAudioClient in modalità condivisa per il device
@@ -509,12 +531,23 @@ bool WasapiEngine::start()
 
     auto *notificationClient = new EndpointNotificationClient(d.get());
     d->enumerator->RegisterEndpointNotificationCallback(notificationClient);
+    d->notificationClient = notificationClient;
 
     return true;
 }
 
 void WasapiEngine::stop()
 {
+    // Deregistrare PRIMA di rilasciare l'enumerator: altrimenti una notifica
+    // di device in arrivo nel frattempo (su un thread COM qualunque) potrebbe
+    // invocare EndpointNotificationClient::refresh() -> Impl::refreshDeviceList
+    // mentre Impl è a metà distruzione più sotto.
+    if (d->enumerator && d->notificationClient) {
+        d->enumerator->UnregisterEndpointNotificationCallback(d->notificationClient);
+        d->notificationClient->Release();
+        d->notificationClient = nullptr;
+    }
+
     for (auto &[id, entry] : d->fileStreams) {
         entry->stopRequested.store(true);
         if (entry->workerThread)
@@ -782,9 +815,18 @@ void WasapiEngine::setKeepAliveEnabled(uint32_t sinkNodeId, bool enabled)
     Impl *impl = d.get();
     auto keepAliveStream = stream;
     stream->thread.reset(QThread::create([impl, deviceId, keepAliveStream]() {
+        // Vedi la stessa nota in fileStreamWorkerLoop: questo thread crea
+        // esso stesso l'IAudioClient (Activate, dentro createRenderTarget)
+        // e senza CoInitializeEx qui l'Activate fallisce con
+        // CO_E_NOTINITIALIZED — createRenderTarget torna nullptr e il
+        // keepalive smette silenziosamente di funzionare.
+        const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         auto target = createRenderTarget(impl, deviceId, 44100.0, 2);
-        if (!target)
+        if (!target) {
+            if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE)
+                CoUninitialize();
             return;
+        }
 
         double phase = 0.0;
         double elapsed = 0.0;
@@ -814,6 +856,8 @@ void WasapiEngine::setKeepAliveEnabled(uint32_t sinkNodeId, bool enabled)
             }
         }
         target->client->Stop();
+        if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE)
+            CoUninitialize();
     }));
     stream->thread->start();
 
@@ -830,9 +874,15 @@ void WasapiEngine::identifySink(uint32_t sinkNodeId)
     // Thread fire-and-forget, si distrugge da solo — stessa idea di
     // PipeWireEngine::identifySink/CoreAudioEngine::identifySink.
     QThread *thread = QThread::create([impl, deviceId]() {
+        // Stesso motivo delle altre due note CoInitializeEx in questo file:
+        // createRenderTarget chiama Activate() su questo thread stesso.
+        const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         auto target = createRenderTarget(impl, deviceId, 44100.0, 2);
-        if (!target)
+        if (!target) {
+            if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE)
+                CoUninitialize();
             return;
+        }
 
         constexpr double kBeepSeconds = 0.15;
         constexpr double kGapSeconds = 0.1;
@@ -870,6 +920,8 @@ void WasapiEngine::identifySink(uint32_t sinkNodeId)
         // Lascia esaurire il buffer già inviato prima di fermare il client.
         QThread::msleep(200);
         target->client->Stop();
+        if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE)
+            CoUninitialize();
     });
     QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     thread->start();
@@ -892,6 +944,35 @@ void WasapiEngine::setSinkMuted(uint32_t sinkNodeId, bool muted)
         return;
     }
     volume->SetMute(muted ? TRUE : FALSE, nullptr);
+}
+
+void WasapiEngine::setOutputDelayMs(uint32_t sinkNodeId, int delayMs)
+{
+    Q_UNUSED(sinkNodeId);
+    Q_UNUSED(delayMs);
+    emit engineError(QStringLiteral("Il ritardo di output non è ancora implementato su Windows"));
+}
+
+void WasapiEngine::setStreamTarget(uint32_t streamNodeId, uint32_t targetSinkNodeId, const QString &targetSinkName)
+{
+    Q_UNUSED(streamNodeId);
+    Q_UNUSED(targetSinkNodeId);
+    Q_UNUSED(targetSinkName);
+    emit engineError(QStringLiteral("Spostare l'audio di un'app non è ancora implementato su Windows"));
+}
+
+void WasapiEngine::clearStreamTarget(uint32_t streamNodeId)
+{
+    Q_UNUSED(streamNodeId);
+}
+
+void WasapiEngine::calibrateOutputDelay(uint32_t sinkNodeIdA, uint32_t sinkNodeIdB, uint32_t micNodeId)
+{
+    Q_UNUSED(sinkNodeIdA);
+    Q_UNUSED(sinkNodeIdB);
+    Q_UNUSED(micNodeId);
+    emit calibrationFinished(sinkNodeIdA, sinkNodeIdB, 0, false,
+                              QStringLiteral("Calibrazione automatica non ancora implementata su Windows"));
 }
 
 void WasapiEngine::setKeepAlivePingFrequency(double hz) { d->keepAliveFrequencyHz.store(hz); }

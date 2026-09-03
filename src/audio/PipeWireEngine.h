@@ -40,11 +40,23 @@ public:
     // Snapshot corrente dei nodi conosciuti (thread-safe, protetto da mutex interno).
     QVector<AudioNode> nodes() const override;
 
-    // Crea un sink virtuale con il nome indicato (es. "zona-cucina").
-    // L'operazione è asincrona: il nodo creato verrà notificato via nodeAdded().
+    // Crea un sink virtuale con il nome indicato (es. "zona-cucina"), via
+    // libpipewire-module-loopback: espone porte "playback_*" (dove arriva
+    // l'audio, es. un'app reindirizzata con setStreamTarget) e "monitor_*"
+    // (dove quell'audio è disponibile per essere collegato altrove con
+    // linkNodes, come una qualunque sorgente). Il lato "riproduzione"
+    // interno del modulo (che normalmente rimanderebbe l'audio catturato
+    // sull'uscita di sistema di default) ha l'autoconnect disattivato
+    // esplicitamente — altrimenti l'audio comparirebbe ANCHE lì,
+    // duplicato, invece di restare confinato al sink virtuale in attesa che
+    // linkNodes lo instradi esplicitamente. L'operazione è asincrona: il
+    // nodo creato verrà notificato via nodeAdded() (Kind::VirtualSink,
+    // correlato per nome).
     void createVirtualSink(const QString &name, const QString &description) override;
 
-    // Rimuove un sink virtuale precedentemente creato.
+    // Rimuove un sink virtuale precedentemente creato (nodeId ottenuto da
+    // nodeAdded dopo createVirtualSink) distruggendo il modulo
+    // libpipewire-module-loopback sottostante.
     void removeVirtualSink(uint32_t nodeId) override;
 
     // Apre filePath e lo carica per intero in memoria (non più letto in
@@ -122,6 +134,32 @@ public:
     // suona la sequenza e si autodistrugge da solo subito dopo — non
     // richiede una removeIdentifySink esplicita.
     void identifySink(uint32_t sinkNodeId) override;
+
+    // Applica un ritardo (millisecondi, 0 = nessuno, max 2000) all'audio
+    // instradato verso questo sink. Realizzato interponendo un
+    // pw_filter dedicato (creato pigramente alla prima richiesta con
+    // delayMs>0, mai distrutto per il resto della sessione anche se
+    // riportato a 0 — evita di dover ricollegare la topologia ad ogni
+    // cambio) tra le sorgenti collegate e il sink reale: linkNodes() verso
+    // un sink che ha già un filtro attivo collega automaticamente alla sua
+    // porta di ingresso invece che al sink direttamente. Effetto quasi
+    // immediato sui collegamenti già attivi (il buffer di ritardo si
+    // riempie gradualmente, nessun ricollegamento necessario). Vedi
+    // PipeWireEngine::Impl::DelayFilter nel .cpp.
+    void setOutputDelayMs(uint32_t sinkNodeId, int delayMs) override;
+
+    // Reindirizza (o ripristina) il routing di un'altra applicazione già
+    // in esecuzione (uno stream Kind::AppStream) tramite la metadata
+    // "default" di PipeWire (chiave "target.object", stessa tecnica usata
+    // da strumenti come pavucontrol/wpctl per "spostare" uno stream) —
+    // richiede che il nodo abbia un stream con permessi M (normale per una
+    // sessione utente). Va richiamato di tanto in tanto mentre la cattura è
+    // attiva (PatchManager tiene un timer periodico): il target è un hint
+    // che il session manager applica alla prossima rivalutazione del
+    // routing, non una garanzia permanente.
+    void setStreamTarget(uint32_t streamNodeId, uint32_t targetSinkNodeId, const QString &targetSinkName) override;
+    void clearStreamTarget(uint32_t streamNodeId) override;
+    void calibrateOutputDelay(uint32_t sinkNodeIdA, uint32_t sinkNodeIdB, uint32_t micNodeId) override;
 
     // Muta/smuta il sink indicato (SPA_PROP_mute) — stesso parametro che
     // manipolano pw-cli/wpctl. Sostituisce un precedente setSinkVolume

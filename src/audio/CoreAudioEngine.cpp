@@ -11,6 +11,7 @@
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
+#include <Block.h>
 
 #include <QMutex>
 #include <QMutexLocker>
@@ -155,6 +156,15 @@ struct CoreAudioEngine::Impl
     QSet<uint32_t> ownAggregateIds;     // aggregate creati da noi: da NON far comparire come "nuovo hardware"
 
     dispatch_queue_t listenerQueue = nullptr;
+    // Va tenuto in vita e riusato IDENTICO tra Add e Remove:
+    // AudioObjectRemovePropertyListenerBlock deregistra per identità del
+    // block, non per equivalenza funzionale — un secondo block literal
+    // "vuoto" creato al momento in stop() (come faceva prima) non
+    // deregistra nulla. Copiato sull'heap con Block_copy perché questo è un
+    // file .cpp puro: senza ARC (che vale solo per Objective-C++), un
+    // block literal locale non sopravvive di suo oltre la funzione che lo
+    // crea (start()).
+    AudioObjectPropertyListenerBlock deviceListChangeBlock = nullptr;
 
     struct FileStreamState
     {
@@ -394,10 +404,23 @@ struct CoreAudioEngine::Impl
         // l'AudioDeviceID dell'aggregate stesso resta lo stesso.
         auto streamIt = fileStreams.find(producerNodeId);
         if (streamIt != fileStreams.end() && streamIt->second->queue) {
+            // kAudioQueueProperty_CurrentDevice è impostabile SOLO a coda
+            // ferma (documentato da Apple) — ma createFileStream() avvia
+            // già la coda subito dopo averla creata, prima ancora che
+            // esista un routing (il primo collegamento di un cue appena
+            // aggiunto arriva sempre dopo, da qui). Senza lo Stop()/Start()
+            // qui sotto questa AudioQueueSetProperty verrebbe
+            // silenziosamente ignorata dal sistema (nessun controllo del
+            // valore di ritorno la segnalerebbe) e il cue continuerebbe a
+            // suonare sul device di default invece che sull'aggregate
+            // appena creato: instradamento che non si applica mai al primo
+            // collegamento.
+            AudioQueueStop(streamIt->second->queue, true);
             CFStringRef aggregateUidRef = toCFString(aggregateUid);
             AudioQueueSetProperty(streamIt->second->queue, kAudioQueueProperty_CurrentDevice,
                                    &aggregateUidRef, sizeof(aggregateUidRef));
             CFRelease(aggregateUidRef);
+            AudioQueueStart(streamIt->second->queue, nullptr);
         }
     }
 };
@@ -538,10 +561,11 @@ bool CoreAudioEngine::start()
                                       kAudioObjectPropertyScopeGlobal,
                                       kAudioObjectPropertyElementMain };
     Impl *impl = d.get();
+    d->deviceListChangeBlock = Block_copy(^(UInt32, const AudioObjectPropertyAddress *) {
+        impl->refreshDeviceList(true);
+    });
     AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &addr, d->listenerQueue,
-                                         ^(UInt32, const AudioObjectPropertyAddress *) {
-                                             impl->refreshDeviceList(true);
-                                         });
+                                         d->deviceListChangeBlock);
     return true;
 }
 
@@ -551,8 +575,12 @@ void CoreAudioEngine::stop()
         AudioObjectPropertyAddress addr{ kAudioHardwarePropertyDevices,
                                           kAudioObjectPropertyScopeGlobal,
                                           kAudioObjectPropertyElementMain };
-        AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &addr, d->listenerQueue,
-                                                ^(UInt32, const AudioObjectPropertyAddress *) {});
+        if (d->deviceListChangeBlock) {
+            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &addr, d->listenerQueue,
+                                                    d->deviceListChangeBlock);
+            Block_release(d->deviceListChangeBlock);
+            d->deviceListChangeBlock = nullptr;
+        }
         dispatch_release(d->listenerQueue);
         d->listenerQueue = nullptr;
     }
@@ -930,6 +958,35 @@ void CoreAudioEngine::setSinkMuted(uint32_t sinkNodeId, bool muted)
         emit engineError(QStringLiteral("Impossibile mutare il sink %1 (il device potrebbe non supportare il muto hardware)")
                           .arg(sinkNodeId));
     }
+}
+
+void CoreAudioEngine::setOutputDelayMs(uint32_t sinkNodeId, int delayMs)
+{
+    Q_UNUSED(sinkNodeId);
+    Q_UNUSED(delayMs);
+    emit engineError(QStringLiteral("Il ritardo di output non è ancora implementato su macOS"));
+}
+
+void CoreAudioEngine::setStreamTarget(uint32_t streamNodeId, uint32_t targetSinkNodeId, const QString &targetSinkName)
+{
+    Q_UNUSED(streamNodeId);
+    Q_UNUSED(targetSinkNodeId);
+    Q_UNUSED(targetSinkName);
+    emit engineError(QStringLiteral("Spostare l'audio di un'app non è ancora implementato su macOS"));
+}
+
+void CoreAudioEngine::clearStreamTarget(uint32_t streamNodeId)
+{
+    Q_UNUSED(streamNodeId);
+}
+
+void CoreAudioEngine::calibrateOutputDelay(uint32_t sinkNodeIdA, uint32_t sinkNodeIdB, uint32_t micNodeId)
+{
+    Q_UNUSED(sinkNodeIdA);
+    Q_UNUSED(sinkNodeIdB);
+    Q_UNUSED(micNodeId);
+    emit calibrationFinished(sinkNodeIdA, sinkNodeIdB, 0, false,
+                              QStringLiteral("Calibrazione automatica non ancora implementata su macOS"));
 }
 
 void CoreAudioEngine::setKeepAlivePingFrequency(double hz)

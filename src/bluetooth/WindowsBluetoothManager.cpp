@@ -204,13 +204,30 @@ void WindowsBluetoothManager::connectDevice(const QString &objectPath)
         record = d->recordsByAddress.value(objectPath);
     }
 
+    // record.radio è lo stesso HANDLE tenuto in Impl::recordsByAddress: se
+    // l'utente fa refresh (bottone "Aggiorna" o semplice riapertura del
+    // dialog Bluetooth, vedi Main.qml) mentre BluetoothSetServiceState sta
+    // ancora girando sul thread qui sotto, refreshDevices() lo chiude
+    // (clearRadioHandles()) e magari l'OS lo riassegna subito ad altro —
+    // il thread lo userebbe già chiuso/altrui. Duplicato qui, in modo
+    // sincrono sul thread Qt (nessuno yield possibile prima di questa
+    // riga), cattura una copia indipendente che resta valida qualunque cosa
+    // faccia refreshDevices() nel frattempo; chiusa dal thread stesso a
+    // lavoro finito.
+    HANDLE radioDup = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), record.radio, GetCurrentProcess(), &radioDup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        emit managerError(QStringLiteral("Impossibile duplicare l'handle del radio Bluetooth"));
+        return;
+    }
+
     WindowsBluetoothManager *self = this;
     // BluetoothSetServiceState può bloccare per la negoziazione della
     // connessione: eseguita su un thread dedicato per non bloccare la UI,
     // stesso contratto "asincrono" di BlueZManager/AppleBluetoothManager.
-    QThread *thread = QThread::create([self, record, objectPath]() mutable {
-        const DWORD result = BluetoothSetServiceState(record.radio, &record.info,
+    QThread *thread = QThread::create([self, record, objectPath, radioDup]() mutable {
+        const DWORD result = BluetoothSetServiceState(radioDup, &record.info,
                                                         &AudioSinkServiceClass_UUID, BLUETOOTH_SERVICE_ENABLE);
+        CloseHandle(radioDup);
         const bool connected = (result == ERROR_SUCCESS);
         QMetaObject::invokeMethod(self, [self, objectPath, connected, result]() {
             if (!connected)
@@ -236,9 +253,19 @@ void WindowsBluetoothManager::disconnectDevice(const QString &objectPath)
         record = d->recordsByAddress.value(objectPath);
     }
 
+    // Vedi la stessa nota in connectDevice: duplica l'handle per non
+    // dipendere dalla sua vita in Impl::recordsByAddress durante l'attesa
+    // asincrona.
+    HANDLE radioDup = nullptr;
+    if (!DuplicateHandle(GetCurrentProcess(), record.radio, GetCurrentProcess(), &radioDup, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        emit managerError(QStringLiteral("Impossibile duplicare l'handle del radio Bluetooth"));
+        return;
+    }
+
     WindowsBluetoothManager *self = this;
-    QThread *thread = QThread::create([self, record, objectPath]() mutable {
-        BluetoothSetServiceState(record.radio, &record.info, &AudioSinkServiceClass_UUID, BLUETOOTH_SERVICE_DISABLE);
+    QThread *thread = QThread::create([self, record, objectPath, radioDup]() mutable {
+        BluetoothSetServiceState(radioDup, &record.info, &AudioSinkServiceClass_UUID, BLUETOOTH_SERVICE_DISABLE);
+        CloseHandle(radioDup);
         QMetaObject::invokeMethod(self, [self, objectPath]() {
             self->refreshDevices();
             emit self->deviceConnectionChanged(objectPath, false);

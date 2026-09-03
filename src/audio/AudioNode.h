@@ -13,7 +13,15 @@ struct AudioNode
         Unknown,
         PhysicalSink,   // es. speaker Bluetooth A2DP
         VirtualSink,    // sink di zona creato da noi
-        Source          // stream applicativo (musica, voce, ecc.)
+        Source,         // stream applicativo (musica, voce, ecc.)
+        // Stream di riproduzione di un'altra applicazione già in esecuzione
+        // sul sistema (es. Firefox, VLC) — media.class "Stream/Output/Audio"
+        // in PipeWire, distinto da Source (le nostre tracce file, sempre
+        // "Audio/Source") perché richiede un trattamento diverso:
+        // catturabile nella playlist come sorgente "sposta l'audio qui"
+        // (vedi PatchManager::addAppStreamCue), non riproducibile/
+        // controllabile da noi come un file.
+        AppStream
     };
 
     uint32_t id = 0;
@@ -36,6 +44,28 @@ struct AudioNode
     // semplice muto/non muto è l'unico controllo che l'app può offrire in
     // modo affidabile, il volume vero e proprio resta al mixer di sistema.
     bool muted = false;
+    // Ritardo (ms) applicato all'audio diretto verso questo sink, per
+    // compensare la latenza aggiuntiva di un altro output (tipicamente un
+    // sink Bluetooth, che aggiunge trasporto+decodifica A2DP) quando la
+    // stessa traccia suona su entrambi contemporaneamente — richiesto
+    // esplicitamente dall'utente. Non letto da PipeWire: è un parametro
+    // applicativo, valorizzato/persistito da PatchManager (vedi
+    // PatchManager::setOutputDelayMs) e realizzato da
+    // PipeWireEngine tramite un filtro di ritardo interposto (vedi
+    // PipeWireEngine::Impl::DelayFilter). 0 = nessun ritardo (passthrough
+    // diretto, comportamento storico).
+    int delayMs = 0;
+    // PID del processo proprietario (PW_KEY_APP_PROCESS_ID), solo per
+    // Kind::AppStream — 0 se non esposto dal client. Usato da
+    // PatchManager per "seguire" lo stream di un'app quando il suo nodeId
+    // sparisce e ne appare uno nuovo dallo stesso processo: comune con
+    // client che passano da pipewire-pulse (es. Firefox, "client.api" =
+    // "pipewire-pulse"), che possono ricreare il proprio stream più volte
+    // durante una riproduzione continua e ininterrotta dal punto di vista
+    // dell'utente — scoperto testando la cattura di un video YouTube in
+    // Firefox, dove il nodeId scelto inizialmente spariva in pochi istanti
+    // pur senza alcuna interruzione udibile della riproduzione.
+    uint32_t appProcessId = 0;
 };
 
 Q_DECLARE_METATYPE(AudioNode)

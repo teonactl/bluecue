@@ -24,6 +24,7 @@ ColumnLayout {
     signal portRemoveRequested(int nodeId)
     signal identifyRequested(int nodeId)
     signal renameRequested(int nodeId, string currentName)
+    signal delayRequested(int nodeId, int currentDelayMs)
     signal anchorChanged(int nodeId, int rowIndex, bool isInput, real cx, real cy, real rx, real ry, real rw, real rh)
     signal dragStarted(int rowIndex, int nodeId, real gx, real gy)
     signal dragMoved(real gx, real gy)
@@ -85,6 +86,7 @@ ColumnLayout {
             isBluetooth: model.isBluetooth
             batteryPercentage: model.batteryPercentage
             muted: model.muted
+            delayMs: model.delayMs
             // Riordino manuale con i pulsanti ▲/▼ (vedi PortRow.qml):
             // column.portModel è un PortModel (QAbstractListModel) C++, con
             // moveNode() invocabile direttamente da QML — a differenza della
@@ -111,6 +113,7 @@ ColumnLayout {
             onIdentifyRequested: column.identifyRequested(model.nodeId)
             onRenameRequested: column.renameRequested(model.nodeId, model.description)
             onMuteToggleRequested: patchManager.setOutputMuted(model.nodeId, !model.muted)
+            onDelayRequested: column.delayRequested(model.nodeId, model.delayMs)
             onMoveUpRequested: column.portModel.moveNode(index, index - 1)
             onMoveDownRequested: column.portModel.moveNode(index, index + 1)
             onAnchorChanged: (nid, rIdx, isInp, cx, cy, rx, ry, rw, rh) => column.anchorChanged(nid, rIdx, isInp, cx, cy, rx, ry, rw, rh)

@@ -37,6 +37,11 @@ Rectangle {
     // netto, non soggetto allo stesso problema, il volume vero resta al
     // mixer di sistema.
     property bool muted: false
+    // Solo lato Output: ritardo (ms) applicato all'audio verso questo sink
+    // (PatchManager::setOutputDelayMs), per compensare la latenza maggiore
+    // di un altro output (tipicamente Bluetooth) quando la stessa traccia
+    // suona su entrambi in contemporanea. 0 = nessuno.
+    property int delayMs: 0
     // Indice della riga nella sua lista (ListView "index"), passato dal
     // delegate — CueList lo usa per identificare la cue trascinata anche
     // quando non ha ancora un nodeId live (nodeId <= 0), dato che il
@@ -74,6 +79,9 @@ Rectangle {
     // Solo lato Output: l'utente ha premuto il pulsante muto/smuta — vedi
     // PatchManager::setOutputMuted.
     signal muteToggleRequested()
+    // Solo lato Output: l'utente ha premuto il pulsante "⏱" per impostare
+    // il ritardo di questo sink — vedi PatchManager::setOutputDelayMs.
+    signal delayRequested()
     // Solo lato Input (playlist): tasto destro sulla riga, per aprire il
     // modal di configurazione pre wait/durata/post wait stile QLab.
     signal configureRequested()
@@ -313,6 +321,33 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: -6
                     onClicked: row.muteToggleRequested()
+                }
+            }
+
+            // Solo lato Output: ritardo impostato per questo sink (vedi
+            // PortRow.delayMs più in alto). Mostra "⏱" da solo quando non
+            // c'è ritardo, altrimenti "⏱ Nms" così è visibile a colpo
+            // d'occhio quale output è già ritardato senza dover aprire il
+            // dialog. Stesso stile a pillola di identifica/muto.
+            Rectangle {
+                visible: !row.isInput
+                radius: 3
+                color: row.delayMs > 0 ? "#4A90D922" : "transparent"
+                implicitWidth: delayLabel.implicitWidth + 4
+                implicitHeight: delayLabel.implicitHeight + 2
+
+                Text {
+                    id: delayLabel
+                    anchors.centerIn: parent
+                    text: row.delayMs > 0 ? ("⏱ " + row.delayMs + "ms") : "⏱"
+                    font.pixelSize: 11
+                    color: row.selected ? "white" : (row.delayMs > 0 ? "#2980B9" : "#5C5A52")
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -6
+                    onClicked: row.delayRequested()
                 }
             }
 

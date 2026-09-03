@@ -17,10 +17,17 @@ constexpr int kMaxRecentProjects = 8;
 const QString kRecentProjectsSettingsKey = QStringLiteral("recentProjects");
 const QString kKeepAliveSettingsKey = QStringLiteral("keepAliveEnabled");
 const QString kOutputNicknamesSettingsKey = QStringLiteral("outputNicknames");
+const QString kOutputDelaysSettingsKey = QStringLiteral("outputDelaysMs");
 const QString kKeepAlivePingFrequencyKey = QStringLiteral("keepAlivePingFrequencyHz");
 const QString kKeepAlivePingAmplitudeKey = QStringLiteral("keepAlivePingAmplitudeUnits");
 const QString kKeepAlivePingDurationKey = QStringLiteral("keepAlivePingDurationMs");
 const QString kKeepAlivePingPeriodKey = QStringLiteral("keepAlivePingPeriodSeconds");
+// Prefisso dei sink virtuali di cattura creati da addAppStreamCue — usato
+// per riconoscere ed escludere sia loro sia il flusso di riproduzione
+// interno del modulo libpipewire-module-loopback ("<nome>-in", che appare
+// nel discovery come un ulteriore Kind::AppStream) dall'elenco degli stream
+// applicativi selezionabili.
+const QString kAppCaptureSinkPrefix = QStringLiteral("bluecue.appcapture.");
 }
 
 PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject *parent)
@@ -29,6 +36,7 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
     , m_blueZ(blueZ)
     , m_inputs(new PortModel(PortModel::Direction::Input, this))
     , m_outputs(new PortModel(PortModel::Direction::Output, this))
+    , m_appStreamReassertTimer(new QTimer(this))
 {
     m_recentProjects = QSettings().value(kRecentProjectsSettingsKey).toStringList();
     m_keepAliveSettingEnabled = QSettings().value(kKeepAliveSettingsKey, true).toBool();
@@ -49,6 +57,11 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
         for (auto it = stored.constBegin(); it != stored.constEnd(); ++it)
             m_outputNicknames.insert(it.key(), it.value().toString());
     }
+    {
+        const QVariantMap stored = QSettings().value(kOutputDelaysSettingsKey).toMap();
+        for (auto it = stored.constBegin(); it != stored.constEnd(); ++it)
+            m_outputDelaysMs.insert(it.key(), it.value().toInt());
+    }
 
     // BlueZManager::devicesChanged scatta dopo ogni refreshDevices() (avvio,
     // apertura del dialog "Dispositivi Bluetooth", o il pulsante "↻" in
@@ -56,6 +69,24 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
     // cui una percentuale batteria aggiornata può essere applicata ai sink
     // Output già scoperti.
     connect(m_blueZ, &BluetoothManager::devicesChanged, this, &PatchManager::refreshBatteryLevels);
+
+    // Auto-recovery per le cue "sorgente app" (vedi addAppStreamCue): il
+    // target impostato sulla metadata "default" di PipeWire è un
+    // suggerimento applicato dal session manager alla prossima
+    // rivalutazione del routing, non una garanzia permanente — riproporlo
+    // periodicamente costa pochissimo (una sola chiamata idempotente per
+    // cue attiva) ed evita di doversi fidare ciecamente di un singolo
+    // tentativo iniziale.
+    m_appStreamReassertTimer->setInterval(5000);
+    connect(m_appStreamReassertTimer, &QTimer::timeout, this, [this]() {
+        for (const Cue &cue : std::as_const(m_cues)) {
+            if (cue.isAppStream && cue.appStreamNodeId != 0 && cue.captureSinkNodeId != 0
+                && cue.nodeId != 0 && !cue.paused && !cue.ended) {
+                m_engine->setStreamTarget(cue.appStreamNodeId, cue.captureSinkNodeId, cue.captureSinkName);
+            }
+        }
+    });
+    m_appStreamReassertTimer->start();
 
     // Ogni nodo scoperto da PipeWire viene smistato in base al suo Kind. I
     // sink (fisici o virtuali) vanno sempre in colonna Output — questo copre
@@ -80,8 +111,46 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
                     break;
                 }
             }
+            // Un vero microfono/line-in hardware, non uno dei nostri
+            // stream interni (file, calibrazione, ecc. — sempre prefissati
+            // "bluecue.") — selezionabile in calibrateOutputDelay.
+            if (!node.name.startsWith(QStringLiteral("bluecue."))) {
+                auto it = std::find_if(m_availableMicrophones.begin(), m_availableMicrophones.end(),
+                                        [&](const AudioNode &n) { return n.id == node.id; });
+                if (it != m_availableMicrophones.end())
+                    *it = node;
+                else
+                    m_availableMicrophones.append(node);
+                emit microphonesChanged();
+            }
+        } else if (node.kind == AudioNode::Kind::AppStream) {
+            handleAppStreamNode(node);
         } else if (node.kind == AudioNode::Kind::PhysicalSink || node.kind == AudioNode::Kind::VirtualSink) {
-            handleSinkNode(node);
+            // Se il nome corrisponde al sink di cattura che una cue
+            // "sorgente app" sta aspettando (vedi beginAppStreamCapture),
+            // completane la correlazione invece di trattarlo come un
+            // output normale della colonna Output — è un dettaglio interno,
+            // non un dispositivo che l'utente ha collegato.
+            bool matchedCapture = false;
+            if (m_appCaptureSinkNames.contains(node.name)) {
+                for (int i = 0; i < m_cues.size(); ++i) {
+                    Cue &cue = m_cues[i];
+                    if (cue.isAppStream && cue.captureSinkNodeId == 0 && cue.captureSinkName == node.name) {
+                        cue.nodeId = node.id;
+                        cue.captureSinkNodeId = node.id;
+                        qDebug() << "PatchManager: sink di cattura correlato" << node.name
+                                 << "nodeId" << node.id << "-- setStreamTarget verso appStreamNodeId"
+                                 << cue.appStreamNodeId;
+                        m_engine->setStreamTarget(cue.appStreamNodeId, node.id, node.name);
+                        applyDesiredConnections(i);
+                        emit cuesChanged();
+                        matchedCapture = true;
+                        break;
+                    }
+                }
+            }
+            if (!matchedCapture)
+                handleSinkNode(node);
         }
     });
     connect(m_engine, &AudioEngine::nodeUpdated, this, [this](const AudioNode &node) {
@@ -91,8 +160,11 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
         // nodo, che arriva qui come nodeUpdated — è per questo che
         // isBluetooth va ricontrollato anche in questo handler, non solo in
         // nodeAdded (vedi PipeWireEngine::Impl::onSinkNodeInfo).
-        if (node.kind != AudioNode::Kind::Source)
-            handleSinkNode(node);
+        if (node.kind == AudioNode::Kind::Source || node.kind == AudioNode::Kind::AppStream)
+            return;
+        if (m_appCaptureSinkNames.contains(node.name))
+            return; // uno dei nostri sink di cattura: mai in colonna Output
+        handleSinkNode(node);
     });
     connect(m_engine, &AudioEngine::nodeRemoved, this, [this](uint32_t nodeId) {
         m_outputs->removeNode(nodeId);
@@ -101,6 +173,53 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
         m_outputNodeDescriptions.remove(nodeId);
         m_outputNodeMacs.remove(nodeId);
         m_engine->setKeepAliveEnabled(nodeId, false); // no-op se non era un sink BT tenuto sveglio
+
+        // Uno stream applicativo selezionabile è sparito (app chiusa, o
+        // smesso di produrre audio): non più scelto nel picker.
+        const auto beforeCount = m_availableAppStreams.size();
+        m_availableAppStreams.erase(
+            std::remove_if(m_availableAppStreams.begin(), m_availableAppStreams.end(),
+                            [nodeId](const AudioNode &n) { return n.id == nodeId; }),
+            m_availableAppStreams.end());
+        if (m_availableAppStreams.size() != beforeCount)
+            emit appStreamsChanged();
+
+        const auto micBeforeCount = m_availableMicrophones.size();
+        m_availableMicrophones.erase(
+            std::remove_if(m_availableMicrophones.begin(), m_availableMicrophones.end(),
+                            [nodeId](const AudioNode &n) { return n.id == nodeId; }),
+            m_availableMicrophones.end());
+        if (m_availableMicrophones.size() != micBeforeCount)
+            emit microphonesChanged();
+
+        // Se quello stream stava alimentando una cattura attiva, prova
+        // PRIMA a "seguirlo" verso un nuovo stream dello stesso processo
+        // (comune con client pipewire-pulse come Firefox, che possono
+        // ricreare il proprio stream più volte durante una riproduzione
+        // continua e ininterrotta dal punto di vista dell'utente — vedi
+        // Cue::appProcessId) — solo se non c'è alcun sostituto già noto la
+        // cattura si ferma davvero. Se un sostituto arriva più tardi
+        // (asincrono, nodeAdded separato), lo raccoglie handleAppStreamNode
+        // grazie ad appStreamNodeId lasciato a 0 qui sotto.
+        for (int i = 0; i < m_cues.size(); ++i) {
+            Cue &cue = m_cues[i];
+            if (cue.isAppStream && cue.appStreamNodeId == nodeId && cue.nodeId != 0) {
+                const uint32_t replacementId = findReplacementAppStreamNodeId(cue.appProcessId, nodeId);
+                if (replacementId != 0) {
+                    cue.appStreamNodeId = replacementId;
+                    qDebug() << "PatchManager: stream" << nodeId << "sparito, agganciato subito il sostituto"
+                             << replacementId << "(stesso processo" << cue.appProcessId << ")";
+                    m_engine->setStreamTarget(replacementId, cue.captureSinkNodeId, cue.captureSinkName);
+                } else if (cue.appProcessId != 0) {
+                    cue.appStreamNodeId = 0; // in attesa: vedi handleAppStreamNode
+                    qDebug() << "PatchManager: stream" << nodeId << "sparito, nessun sostituto ancora noto"
+                             << "(processo" << cue.appProcessId << "), in attesa";
+                } else {
+                    stopCueAt(i); // nessun PID noto: impossibile seguirlo, ferma la cattura
+                }
+                break;
+            }
+        }
     });
 
     // Una traccia con loopCount finito si ferma da sola (silenzio) quando
@@ -115,6 +234,32 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
                 break;
             }
         }
+    });
+
+    // Esito di calibrateOutputDelay: deltaMsAtoB = latenza(B) - latenza(A).
+    // Positivo => A è il più veloce e va ritardato di deltaMsAtoB (B
+    // riportato a 0, ora è lui il riferimento); negativo => il contrario.
+    // Un valore di ~0 (sotto la risoluzione della rilevazione, ~5ms) non
+    // ha senso ritardare nulla: entrambi a 0.
+    connect(m_engine, &AudioEngine::calibrationFinished, this,
+            [this](uint32_t sinkA, uint32_t sinkB, int deltaMsAtoB, bool success, const QString &message) {
+        m_calibrationInProgress = false;
+        emit calibrationStateChanged();
+        if (!success) {
+            emit calibrationResult(false, message);
+            return;
+        }
+        if (deltaMsAtoB > 0) {
+            setOutputDelayMs(sinkA, deltaMsAtoB);
+            setOutputDelayMs(sinkB, 0);
+        } else if (deltaMsAtoB < 0) {
+            setOutputDelayMs(sinkB, -deltaMsAtoB);
+            setOutputDelayMs(sinkA, 0);
+        } else {
+            setOutputDelayMs(sinkA, 0);
+            setOutputDelayMs(sinkB, 0);
+        }
+        emit calibrationResult(true, tr("Ritardo misurato: %1ms").arg(qAbs(deltaMsAtoB)));
     });
 
     // Nota: PipeWireEngine::fileStreamLooped (un giro completo del file) non
@@ -148,6 +293,16 @@ void PatchManager::handleSinkNode(const AudioNode &node)
     const QString nickname = m_outputNicknames.value(node.name);
     if (!nickname.isEmpty())
         m_outputs->updateDescription(node.id, nickname);
+    // Stesso principio del nickname: se questo sink ha già un ritardo
+    // salvato da una sessione precedente (per nome stabile), va applicato
+    // subito sia al motore (altrimenti il routing partirebbe senza
+    // ritardo finché l'utente non tocca di nuovo il controllo) sia alla
+    // riga in colonna Output.
+    const int savedDelayMs = m_outputDelaysMs.value(node.name, 0);
+    if (savedDelayMs > 0) {
+        m_engine->setOutputDelayMs(node.id, savedDelayMs);
+        m_outputs->updateDelayMs(node.id, savedDelayMs);
+    }
     // Le casse Bluetooth in colonna Output ricevono un ping periodico per
     // non andare in stand-by per inattività (vedi
     // PipeWireEngine::setKeepAliveEnabled), a meno che l'utente non l'abbia
@@ -160,6 +315,89 @@ void PatchManager::handleSinkNode(const AudioNode &node)
         if (m_keepAliveSettingEnabled)
             m_engine->setKeepAliveEnabled(node.id, true);
     }
+}
+
+void PatchManager::handleAppStreamNode(const AudioNode &node)
+{
+    if (node.name.startsWith(kAppCaptureSinkPrefix))
+        return; // il nostro stesso "<nome>-in" (vedi PipeWireEngine::createVirtualSink): non è una sorgente da poter scegliere
+
+    // Se una cue "sorgente app" attiva stava aspettando un sostituto dallo
+    // stesso processo (il suo stream precedente è sparito senza che
+    // l'utente fermasse nulla — vedi il commento sul nodeRemoved qui
+    // sotto, comune con client pipewire-pulse come Firefox), riagganciala
+    // subito a questo nuovo stream invece di lasciarla silenziosa.
+    // appStreamNodeId == 0 distingue "in attesa di un sostituto" da una cue
+    // già agganciata a un nodeId vivo (che non va toccata qui).
+    if (node.appProcessId != 0) {
+        for (int i = 0; i < m_cues.size(); ++i) {
+            Cue &cue = m_cues[i];
+            if (cue.isAppStream && cue.nodeId != 0 && cue.appStreamNodeId == 0
+                && cue.appProcessId == node.appProcessId) {
+                cue.appStreamNodeId = node.id;
+                qDebug() << "PatchManager: cue" << i << "riagganciata al nuovo stream" << node.name
+                         << "nodeId" << node.id << "dello stesso processo" << node.appProcessId;
+                m_engine->setStreamTarget(node.id, cue.captureSinkNodeId, cue.captureSinkName);
+                emit cuesChanged();
+            }
+        }
+    }
+
+    auto it = std::find_if(m_availableAppStreams.begin(), m_availableAppStreams.end(),
+                            [&](const AudioNode &n) { return n.id == node.id; });
+    if (it != m_availableAppStreams.end())
+        *it = node;
+    else
+        m_availableAppStreams.append(node);
+    emit appStreamsChanged();
+}
+
+uint32_t PatchManager::findReplacementAppStreamNodeId(uint32_t appProcessId, uint32_t excludeNodeId) const
+{
+    if (appProcessId == 0)
+        return 0;
+    for (const AudioNode &n : m_availableAppStreams) {
+        if (n.appProcessId == appProcessId && n.id != excludeNodeId)
+            return n.id;
+    }
+    return 0;
+}
+
+QVariantList PatchManager::appStreamsModel() const
+{
+    QVariantList result;
+    result.reserve(m_availableAppStreams.size());
+    for (const AudioNode &n : m_availableAppStreams) {
+        QVariantMap entry;
+        entry[QStringLiteral("nodeId")] = n.id;
+        entry[QStringLiteral("description")] = n.description.isEmpty() ? n.name : n.description;
+        result.append(entry);
+    }
+    return result;
+}
+
+QVariantList PatchManager::microphonesModel() const
+{
+    QVariantList result;
+    result.reserve(m_availableMicrophones.size());
+    for (const AudioNode &n : m_availableMicrophones) {
+        QVariantMap entry;
+        entry[QStringLiteral("nodeId")] = n.id;
+        entry[QStringLiteral("description")] = n.description.isEmpty() ? n.name : n.description;
+        result.append(entry);
+    }
+    return result;
+}
+
+void PatchManager::calibrateOutputDelay(uint32_t nodeIdA, uint32_t nodeIdB, uint32_t micNodeId)
+{
+    if (m_calibrationInProgress) {
+        emit patchError(tr("Una calibrazione è già in corso"));
+        return;
+    }
+    m_calibrationInProgress = true;
+    emit calibrationStateChanged();
+    m_engine->calibrateOutputDelay(nodeIdA, nodeIdB, micNodeId);
 }
 
 void PatchManager::refreshBatteryLevels()
@@ -197,6 +435,32 @@ void PatchManager::addCueFile(const QUrl &fileUrl)
 
     if (m_armedIndex < 0)
         m_armedIndex = m_cues.size() - 1; // coda vuota: arma subito questa traccia
+
+    emit cuesChanged();
+}
+
+void PatchManager::addAppStreamCue(uint32_t appStreamNodeId)
+{
+    const auto it = std::find_if(m_availableAppStreams.cbegin(), m_availableAppStreams.cend(),
+                                  [&](const AudioNode &n) { return n.id == appStreamNodeId; });
+    if (it == m_availableAppStreams.cend()) {
+        emit patchError(tr("Sorgente app non più disponibile"));
+        return;
+    }
+
+    pushUndoSnapshot();
+
+    Cue cue;
+    cue.id = m_nextCueId++;
+    cue.isAppStream = true;
+    cue.appStreamNodeId = appStreamNodeId;
+    cue.appProcessId = it->appProcessId;
+    cue.appStreamMatchName = it->name;
+    cue.displayName = it->description.isEmpty() ? it->name : it->description;
+    m_cues.append(cue);
+
+    if (m_armedIndex < 0)
+        m_armedIndex = m_cues.size() - 1;
 
     emit cuesChanged();
 }
@@ -276,10 +540,25 @@ void PatchManager::stopCueAt(int index)
                 ++it;
             }
         }
-        m_engine->removeFileStream(cue.nodeId);
+        if (cue.isAppStream) {
+            // appStreamNodeId può essere 0 qui: la cue era "in attesa" di
+            // un sostituto dallo stesso processo (vedi il commento su
+            // Cue::appProcessId/nodeRemoved) quando l'utente l'ha fermata a
+            // mano. Il subject 0 della metadata PipeWire è quello globale
+            // ("default.audio.sink" ecc.): NON va mai usato come se fosse
+            // "nessuno stream", quindi va saltato esplicitamente qui.
+            if (cue.appStreamNodeId != 0)
+                m_engine->clearStreamTarget(cue.appStreamNodeId);
+            m_engine->removeVirtualSink(cue.captureSinkNodeId);
+            m_appCaptureSinkNames.remove(cue.captureSinkName);
+        } else {
+            m_engine->removeFileStream(cue.nodeId);
+        }
     }
 
     cue.nodeId = 0;
+    cue.captureSinkNodeId = 0;
+    cue.captureSinkName.clear();
     cue.rotateOutputIndex = 0;
     cue.waitingToStart = false;
     cue.inPostWait = false;
@@ -288,6 +567,30 @@ void PatchManager::stopCueAt(int index)
     cue.pendingStreamName.clear();
     emit connectionsChanged();
     emit cuesChanged();
+}
+
+void PatchManager::setCueLiveActive(Cue &cue, bool active)
+{
+    if (cue.isAppStream) {
+        // Non esiste un vero "pausa" per uno stream che non controlliamo
+        // noi: l'equivalente più fedele è smettere di alimentare il sink
+        // di cattura (silenzio reale, il monitor non riceve più nulla) o
+        // riprendere a farlo, senza toccare il sink/i collegamenti, che
+        // restano vivi esattamente come setFileStreamActive fa per una
+        // cue file.
+        // appStreamNodeId può essere 0 se la cue è "in attesa" di un
+        // sostituto dallo stesso processo (vedi Cue::appProcessId) — in
+        // quel caso non c'è nessuno stream su cui agire, il subject 0 della
+        // metadata PipeWire è quello globale, non va mai usato qui.
+        if (cue.appStreamNodeId != 0) {
+            if (active)
+                m_engine->setStreamTarget(cue.appStreamNodeId, cue.captureSinkNodeId, cue.captureSinkName);
+            else
+                m_engine->clearStreamTarget(cue.appStreamNodeId);
+        }
+    } else {
+        m_engine->setFileStreamActive(cue.nodeId, active);
+    }
 }
 
 void PatchManager::advanceCue()
@@ -353,6 +656,9 @@ QVector<PatchManager::CueSnapshotEntry> PatchManager::snapshotCues() const
         entry.preWaitSeconds = c.preWaitSeconds;
         entry.durationSeconds = c.durationSeconds;
         entry.postWaitSeconds = c.postWaitSeconds;
+        entry.isAppStream = c.isAppStream;
+        entry.appStreamNodeId = c.appStreamNodeId;
+        entry.appStreamMatchName = c.appStreamMatchName;
         result.append(entry);
     }
     return result;
@@ -394,6 +700,15 @@ void PatchManager::restoreCueSnapshot(const QVector<CueSnapshotEntry> &snapshot)
         cue.preWaitSeconds = entry.preWaitSeconds;
         cue.durationSeconds = entry.durationSeconds;
         cue.postWaitSeconds = entry.postWaitSeconds;
+        // isAppStream/appStreamNodeId sono già preservati dalla copia
+        // iniziale (m_cues[existingIdx]) per una cue ancora presente; per
+        // una resuscitata da zero (rimossa dopo lo snapshot, "ripetuta" ora)
+        // vanno invece ripristinati dallo snapshot come tutto il resto.
+        if (existingIdx < 0) {
+            cue.isAppStream = entry.isAppStream;
+            cue.appStreamNodeId = entry.appStreamNodeId;
+            cue.appStreamMatchName = entry.appStreamMatchName;
+        }
         newCues.append(cue);
     }
 
@@ -492,14 +807,43 @@ void PatchManager::startCueNow(int index)
     cue.paused = false;
     const quint64 generation = cue.playbackGeneration; // impostato da playCueAt al momento del trigger
 
-    const QString streamName = m_engine->createFileStream(cue.filePath, cue.displayName,
-                                                            cue.loopCount, cue.reverse);
-    if (streamName.isEmpty()) {
-        emit patchError(tr("Impossibile riprodurre: %1").arg(cue.displayName));
-        emit cuesChanged();
-        return;
+    if (cue.isAppStream) {
+        // Una cue ricaricata da un file di progetto (o che aveva perso il
+        // suo stream senza trovare un sostituto — vedi Cue::appProcessId)
+        // arriva qui con appStreamNodeId a 0: ri-risolvilo ORA cercando tra
+        // gli stream applicativi attualmente noti quello con lo stesso
+        // nome tecnico stabile. Ambiguo se più stream con lo stesso nome
+        // sono attivi insieme (es. due finestre Firefox): prende il primo,
+        // limite accettato.
+        if (cue.appStreamNodeId == 0) {
+            uint32_t resolvedNodeId = 0;
+            uint32_t resolvedProcessId = 0;
+            for (const AudioNode &n : m_availableAppStreams) {
+                if (n.name == cue.appStreamMatchName) {
+                    resolvedNodeId = n.id;
+                    resolvedProcessId = n.appProcessId;
+                    break;
+                }
+            }
+            if (resolvedNodeId == 0) {
+                emit patchError(tr("Sorgente app '%1' non disponibile al momento").arg(cue.appStreamMatchName));
+                emit cuesChanged();
+                return;
+            }
+            cue.appStreamNodeId = resolvedNodeId;
+            cue.appProcessId = resolvedProcessId;
+        }
+        beginAppStreamCapture(index);
+    } else {
+        const QString streamName = m_engine->createFileStream(cue.filePath, cue.displayName,
+                                                                cue.loopCount, cue.reverse);
+        if (streamName.isEmpty()) {
+            emit patchError(tr("Impossibile riprodurre: %1").arg(cue.displayName));
+            emit cuesChanged();
+            return;
+        }
+        cue.pendingStreamName = streamName;
     }
-    cue.pendingStreamName = streamName;
 
     if (cue.durationSeconds > 0.0) {
         const quint64 cueId = cue.id;
@@ -518,6 +862,25 @@ void PatchManager::startCueNow(int index)
     emit cuesChanged();
 }
 
+void PatchManager::beginAppStreamCapture(int index)
+{
+    if (index < 0 || index >= m_cues.size())
+        return;
+
+    Cue &cue = m_cues[index];
+    const QString captureSinkName = kAppCaptureSinkPrefix + QString::number(cue.appStreamNodeId);
+    cue.captureSinkName = captureSinkName;
+    m_appCaptureSinkNames.insert(captureSinkName);
+
+    // Il nodeId del sink virtuale (e il conseguente setStreamTarget che
+    // "sposta" davvero l'audio) arriva in modo asincrono tramite nodeAdded,
+    // correlato per nome — vedi il ramo Kind::PhysicalSink/VirtualSink nel
+    // costruttore.
+    qDebug() << "PatchManager: beginAppStreamCapture cueIndex" << index
+             << "appStreamNodeId" << cue.appStreamNodeId << "captureSinkName" << captureSinkName;
+    m_engine->createVirtualSink(captureSinkName, tr("Cattura: %1").arg(cue.displayName));
+}
+
 void PatchManager::handleCueNaturalEnd(int index)
 {
     if (index < 0 || index >= m_cues.size())
@@ -528,7 +891,7 @@ void PatchManager::handleCueNaturalEnd(int index)
         return; // già fermata a mano, o già gestita (durata e loop scaduti insieme)
     cue.ended = true;
 
-    m_engine->setFileStreamActive(cue.nodeId, false); // silenzio, nodo/collegamenti vivi
+    setCueLiveActive(cue, false); // silenzio, nodo/collegamenti vivi
 
     if (cue.postWaitSeconds > 0.0) {
         cue.inPostWait = true;
@@ -551,7 +914,7 @@ void PatchManager::play()
     bool resumedAny = false;
     for (Cue &cue : m_cues) {
         if (cue.nodeId != 0 && cue.paused && !cue.ended) {
-            m_engine->setFileStreamActive(cue.nodeId, true);
+            setCueLiveActive(cue, true);
             cue.paused = false;
             resumedAny = true;
         }
@@ -570,7 +933,7 @@ void PatchManager::pause()
     bool pausedAny = false;
     for (Cue &cue : m_cues) {
         if (cue.nodeId != 0 && !cue.paused && !cue.ended && !cue.waitingToStart) {
-            m_engine->setFileStreamActive(cue.nodeId, false);
+            setCueLiveActive(cue, false);
             cue.paused = true;
             pausedAny = true;
         }
@@ -879,6 +1242,13 @@ bool PatchManager::writeProjectToPath(const QString &filePath)
     QJsonArray cuesArray;
     for (const Cue &c : m_cues) {
         QJsonObject cueObj;
+        // Una cue "sorgente app" (Firefox, ecc.) non ha un filePath: al
+        // caricamento non c'è nessuno stream live da riprendere, solo il
+        // nome tecnico stabile (appStreamMatchName) da ri-risolvere al
+        // momento del Play, se e quando l'app sarà di nuovo in esecuzione
+        // — vedi PatchManager::startCueNow.
+        cueObj[QStringLiteral("isAppStream")] = c.isAppStream;
+        cueObj[QStringLiteral("appStreamMatchName")] = c.appStreamMatchName;
         cueObj[QStringLiteral("filePath")] = c.filePath;
         // Il nome può essere stato rinominato dall'utente (doppio click in
         // CueList.qml) e non corrispondere più al nome del file — va
@@ -941,20 +1311,35 @@ bool PatchManager::loadProjectFromPath(const QString &filePath)
 
     const QJsonArray cuesArray = doc.object().value(QStringLiteral("cues")).toArray();
     for (const QJsonValue &v : cuesArray) {
+        const bool isAppStream = v.toObject().value(QStringLiteral("isAppStream")).toBool(false);
         const QString path = v.toObject().value(QStringLiteral("filePath")).toString();
-        const QFileInfo info(path);
-        if (!info.exists()) {
-            emit patchError(tr("File non trovato, saltato: %1").arg(path));
-            continue;
-        }
+
         Cue cue;
         cue.id = m_nextCueId++;
-        cue.filePath = path;
-        // Ripiega sul nome del file solo se il progetto non ha un
-        // displayName salvato (file di progetto più vecchi di questa
-        // funzionalità) — altrimenti un nome scelto dall'utente andrebbe
-        // perso ad ogni caricamento.
-        cue.displayName = v.toObject().value(QStringLiteral("displayName")).toString(info.fileName());
+        cue.isAppStream = isAppStream;
+
+        if (isAppStream) {
+            // Nessuno stream live da riprendere: solo il nome tecnico
+            // stabile, ri-risolto a un nodeId vero al momento del Play se
+            // e quando l'app sarà di nuovo in esecuzione (vedi
+            // PatchManager::startCueNow) — appStreamNodeId/nodeId restano
+            // a 0 finché non succede.
+            cue.appStreamMatchName = v.toObject().value(QStringLiteral("appStreamMatchName")).toString();
+            cue.displayName = v.toObject().value(QStringLiteral("displayName")).toString(cue.appStreamMatchName);
+        } else {
+            const QFileInfo info(path);
+            if (!info.exists()) {
+                emit patchError(tr("File non trovato, saltato: %1").arg(path));
+                continue;
+            }
+            cue.filePath = path;
+            // Ripiega sul nome del file solo se il progetto non ha un
+            // displayName salvato (file di progetto più vecchi di questa
+            // funzionalità) — altrimenti un nome scelto dall'utente
+            // andrebbe perso ad ogni caricamento.
+            cue.displayName = v.toObject().value(QStringLiteral("displayName")).toString(info.fileName());
+        }
+
         const QJsonArray outputsArray = v.toObject().value(QStringLiteral("outputs")).toArray();
         for (const QJsonValue &outputValue : outputsArray)
             cue.desiredOutputNames.append(outputValue.toString());
@@ -1118,6 +1503,24 @@ void PatchManager::setOutputNickname(uint32_t nodeId, const QString &nickname)
     emit cuesChanged(); // ricalcola desiredOutputLabels (etichette rotazione / pannello Trasforma)
 }
 
+void PatchManager::setOutputDelayMs(uint32_t nodeId, int delayMs)
+{
+    const QString stableName = m_outputNodeNames.value(nodeId);
+    if (stableName.isEmpty())
+        return; // sink non (più) scoperto: nessun nome stabile a cui agganciare il ritardo
+
+    delayMs = std::clamp(delayMs, 0, 2000);
+    m_outputDelaysMs.insert(stableName, delayMs);
+
+    QVariantMap toStore;
+    for (auto it = m_outputDelaysMs.constBegin(); it != m_outputDelaysMs.constEnd(); ++it)
+        toStore.insert(it.key(), it.value());
+    QSettings().setValue(kOutputDelaysSettingsKey, toStore);
+
+    m_engine->setOutputDelayMs(nodeId, delayMs);
+    m_outputs->updateDelayMs(nodeId, delayMs);
+}
+
 void PatchManager::toggleConnection(uint32_t inputNodeId, uint32_t outputNodeId)
 {
     auto it = std::find_if(m_connections.begin(), m_connections.end(), [&](const PatchConnection &c) {
@@ -1169,6 +1572,7 @@ QVariantList PatchManager::cueModel() const
     for (const Cue &c : m_cues) {
         QVariantMap entry;
         entry[QStringLiteral("displayName")] = c.displayName;
+        entry[QStringLiteral("isAppStream")] = c.isAppStream;
         entry[QStringLiteral("nodeId")] = c.nodeId;
         // nodeId live (se presenti) di tutti gli output attualmente
         // scoperti il cui nome compare in desiredOutputNames — usata dalla
