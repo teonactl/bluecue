@@ -122,3 +122,7 @@ L'interfaccia è in QML (`qml/`), esposta come context property.
 
 Per il dettaglio di ogni feature, le decisioni prese e i bug noti/risolti,
 vedi [`PROJECT_STATUS.md`](PROJECT_STATUS.md).
+
+## Licenza
+
+[GNU GPLv3](LICENSE).
