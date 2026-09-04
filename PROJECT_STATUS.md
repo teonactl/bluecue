@@ -1200,10 +1200,18 @@ Xtreme 3 vera già accoppiata) — Bluetooth e output funzionano, ma due bug:
   una palette molto più cruda e scura — quasi nera, con `palette.windowText`
   forzato scuro sopra (vedi sotto) praticamente invisibile. `ApplicationWindow`
   non impostava mai un colore di sfondo proprio, quindi ereditava questa
-  palette automatica invece di un colore fisso. **Fix**: aggiunto
+  palette automatica invece di un colore fisso. **Fix v1**: aggiunto
   `color: "#F0F0EE"` esplicito su `ApplicationWindow` in `Main.qml` — stessa
   famiglia di grigio chiaro già usata ovunque nell'app (righe Output,
   dialoghi), indipendente dal tema di sistema o dal tipo di packaging.
+  **Retest dello stesso giorno: "peggiorato"** — `color:` copre solo il
+  fill della superficie della Window, non lo sfondo della MenuBar (che
+  dipinge il proprio sfondo leggendo `palette.window` separatamente):
+  risultato, la sola MenuBar restava scura mentre il resto della finestra
+  diventava chiaro — uno strappo netto tra due zone invece del problema
+  uniforme di prima. **Fix v2**: aggiunto anche `palette.window: "#F0F0EE"`
+  (NON `palette.base`, lasciata intatta apposta per non rompere lo sfondo
+  scuro nativo voluto di `nicknameField`, vedi il commento lì).
 - **Etichette del pannello Trasforma bloccate sul nome tecnico grezzo
   PipeWire (es. "bluez_output.54_15_89_75_DD_AF.1") invece del nome
   leggibile ("JBL Xtreme 3"), a intermittenza ("è riapparso").** Causa:

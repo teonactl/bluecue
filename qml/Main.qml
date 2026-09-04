@@ -27,6 +27,17 @@ ApplicationWindow {
     palette.windowText: "#2C2C2A"
     palette.text: "#2C2C2A"
     palette.buttonText: "#2C2C2A"
+    // palette.window (NON palette.base, lasciata intatta apposta — vedi il
+    // commento su nicknameField più sotto, che dipende dallo sfondo nativo
+    // scuro dei campi di testo): copre lo sfondo di MenuBar/Dialog/ToolBar,
+    // che "color:" sotto NON tocca (è solo il fill della superficie della
+    // Window, MenuBar dipinge il proprio sfondo separatamente leggendo
+    // palette.window). Senza, la sola MenuBar restava scura mentre il resto
+    // della finestra diventava chiara col fix sotto — uno strappo netto tra
+    // due zone di colore invece di un problema uniforme, segnalato
+    // dall'utente come "peggiorato" rispetto a prima. Stessa causa di fondo
+    // (xdgdesktopportal, vedi sotto), stesso colore per coerenza visiva.
+    palette.window: "#F0F0EE"
 
     // Sfondo della finestra impostato esplicitamente (non lasciato al
     // default della palette): senza, ApplicationWindow dipende da
