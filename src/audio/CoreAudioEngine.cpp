@@ -368,6 +368,20 @@ struct CoreAudioEngine::Impl
         return deviceUids.value(nodeId);
     }
 
+    // Nome leggibile (quello mostrato nella riga della colonna Output, vedi
+    // PortColumn.qml "model.description") corrispondente a un nodeId — solo
+    // per diagnostica nei log, per capire subito se la riga a cui punta un
+    // routing è davvero quella che l'utente crede di vedere in UI.
+    QString descriptionFor(uint32_t nodeId) const
+    {
+        QMutexLocker locker(&mutex);
+        for (const AudioNode &n : nodes) {
+            if (n.id == nodeId)
+                return n.description;
+        }
+        return {};
+    }
+
     // --- Aggregate device (routing di un producer verso N output) ---
 
     // Ricostruisce l'insieme deduplicato di output collegati al producer
@@ -1048,7 +1062,8 @@ void CoreAudioEngine::setFileStreamActive(uint32_t nodeId, bool active)
 
 uint32_t CoreAudioEngine::linkNodes(uint32_t outputNodeId, uint32_t inputNodeId)
 {
-    qDebug("CoreAudioEngine::linkNodes producer=%u -> sink=%u", outputNodeId, inputNodeId);
+    qDebug("CoreAudioEngine::linkNodes producer=%u -> sink=%u (nome mostrato in UI: \"%s\")",
+           outputNodeId, inputNodeId, qPrintable(d->descriptionFor(inputNodeId)));
     const uint32_t linkId = d->nextLinkId++;
     d->links.append(Impl::LinkEntry{ linkId, outputNodeId, inputNodeId });
     d->syncAggregateForProducer(outputNodeId);

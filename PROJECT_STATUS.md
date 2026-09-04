@@ -1641,3 +1641,27 @@ successivo `nodeRemoved` per lo stesso id.
 reale (stesso scenario, traccia collegata a UNA sola cassa Bluetooth) per
 verificare che ora la riga si aggiorni correttamente e l'audio esca
 davvero sulla cassa.
+
+**Svolta importante (2026-09-04, sera): il motore audio funziona, il
+routing NON arriva mai alla cassa Bluetooth.** Log con la diagnostica
+`IsRunning`/contatore-callback: per DUE tracce diverse collegate in
+sequenza dall'utente, l'`AudioQueue` risulta `IsRunning=1` e la callback
+viene invocata ripetutamente dopo ~800ms — l'audio sta scorrendo per
+davvero, il motore CoreAudio funziona. Il problema è che **nessuna delle
+due è finita sulla cassa Bluetooth**: la prima è stata instradata verso
+`MSLoopbackDriverDevice_UID` (un driver audio virtuale, non hardware —
+probabilmente installato da Teams o software simile), la seconda di nuovo
+verso `BuiltInSpeakerDevice` (altoparlanti interni, stesso device sbagliato
+del test precedente). `PortColumn.qml` mostra correttamente
+`model.description` (il nome leggibile), non l'UID grezzo, quindi la riga
+dovrebbe avere un'etichetta sensata — ma non è chiaro se in questo momento
+mostri ancora, per qualche riga, un nome ORMAI STANTIO (rimasto da un
+nodeId riciclato prima del fix di identità, o riciclato di nuovo in un
+modo non ancora coperto) invece del device reale a cui punta. Aggiunto
+`descriptionFor()` (lookup per nodeId nello stesso `nodes` usato da
+`PortColumn.qml`) e loggato anche nel debug di `linkNodes` — il prossimo
+log dirà direttamente il nome leggibile del device a cui l'utente ha
+DAVVERO agganciato il cavo, eliminando l'ambiguità. **Richiesto anche
+uno screenshot della colonna Output all'utente**, per confrontare
+visivamente cosa mostra l'interfaccia con cosa dice il log nello stesso
+istante — non ancora ricevuto/analizzato.
