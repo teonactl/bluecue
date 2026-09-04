@@ -555,7 +555,16 @@ bool CoreAudioEngine::start()
 {
     d->listenerQueue = dispatch_queue_create("com.bluecue.coreaudio.listener", DISPATCH_QUEUE_SERIAL);
 
-    d->refreshDeviceList(false); // popolamento iniziale, senza emettere segnali (nessun listener QML ancora collegato)
+    // emitSignals=true, non false: PatchManager scopre OGNI sink (incluso
+    // quelli già presenti all'avvio) esclusivamente tramite nodeAdded, non
+    // con una chiamata separata tipo "dammi la lista attuale" (vedi il
+    // commento in PatchManager.cpp sopra la connessione a nodeAdded). Il
+    // "nessun listener QML ancora collegato" di prima era una motivazione
+    // sbagliata: l'emit passa comunque per QMetaObject::invokeMethod con
+    // Qt::QueuedConnection, quindi la consegna avviene solo dopo l'avvio del
+    // loop eventi Qt — quando PatchManager si è già collegato da un pezzo.
+    // Stesso identico bug reale corretto in WasapiEngine::start().
+    d->refreshDeviceList(true);
 
     AudioObjectPropertyAddress addr{ kAudioHardwarePropertyDevices,
                                       kAudioObjectPropertyScopeGlobal,

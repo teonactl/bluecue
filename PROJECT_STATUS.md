@@ -1162,10 +1162,21 @@ packaging):
   `QML_SOURCES_PATHS` (l'equivalente per questo tool) — aggiunta
   (`QML_SOURCES_PATHS="$PWD/qml"`).
 
-**Non ancora riverificato**: serve un nuovo giro di CI + un test reale
-scaricando lo zip/installer Windows aggiornato sulla stessa VM. Se
-risolve l'avvio, il codice del backend WASAPI (vedi la sezione bug
-statici sotto) diventa finalmente testabile dal vivo per la prima volta.
+**Aggiornamento (stesso giorno, dopo il fix)**: l'utente ha davvero testato
+l'installer aggiornato su una VM Windows (VirtualBox) — **l'app ora si
+avvia**, prima vera conferma dal vivo che il fix `--qmldir` era quello
+giusto. Da lì sono emersi due problemi nuovi, entrambi diagnosticati e/o
+chiariti nella stessa sessione:
+- **Bluetooth non trovato**: non è un bug — la VM non ha nessun adattatore
+  Bluetooth (confermato in Gestione dispositivi), quindi nessuna app può
+  vederne uno lì dentro. Serve un dongle USB Bluetooth passato alla VM (o
+  hardware reale) per testare quella parte.
+- **Colonna Output vuota anche con l'audio della VM presente in Windows**:
+  bug reale, trovato leggendo `WasapiEngine::start()` — vedi il primo punto
+  della sezione bug statici qui sotto (`refreshDeviceList(false)` invece di
+  `true`), stesso identico bug trovato e corretto anche in
+  `CoreAudioEngine::start()` (mai testato dal vivo, ma stesso schema di
+  codice, quasi certo lo stesso problema su macOS).
 
 ## Bug trovati per revisione statica del codice nei backend Windows/macOS
 (2026-09-02/03), mai testati dal vivo
@@ -1179,6 +1190,25 @@ vedi la nota in cima a `WasapiEngine.h`/`CoreAudioEngine.h`/
 file è mai stato compilato/eseguito su hardware reale, solo via CI). Tutti
 corretti, **nessuno verificato dal vivo** — da confermare quando l'utente
 potrà testare su un Mac/PC Windows reale.
+
+- **`WasapiEngine.cpp`/`CoreAudioEngine.cpp`: `start()` chiamava
+  `refreshDeviceList(false)` per la scansione iniziale dei device.**
+  **Questo è l'unico bug di questa lista CONFERMATO dal vivo** (2026-09-04,
+  VM Windows): `emitSignals=false` sopprime l'emissione di `nodeAdded` per
+  ogni sink trovato — ma `PatchManager` scopre gli output ESCLUSIVAMENTE
+  tramite quel segnale (vedi il commento sopra la sua connessione in
+  `PatchManager.cpp`: "copre sia i jack hardware sia i sink Bluetooth già
+  connessi al momento dell'avvio"), non c'è nessuna chiamata separata tipo
+  "dammi la lista attuale". Risultato: colonna Output vuota per sempre,
+  anche con un output audio perfettamente funzionante in Windows/macOS —
+  esattamente il sintomo riportato ("vedo Altoparlanti in Windows ma niente
+  tra i sink di bluecue"). Il commento originale ("nessun listener QML
+  ancora collegato") era una motivazione sbagliata: l'emit passa comunque
+  per `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`, quindi la
+  consegna avviene solo dopo l'avvio del loop eventi Qt (`app.exec()`) —
+  molto dopo che `PatchManager` si è già collegato al segnale in `main.cpp`.
+  **Fix**: `refreshDeviceList(true)` in entrambi. Non ancora riverificato
+  dal vivo dopo il fix (serve un nuovo giro di CI + retest sulla VM).
 
 - **`main.cpp`: `QT_QPA_PLATFORMTHEME=xdgdesktopportal` applicato senza
   guardia di piattaforma.** Era impostato incondizionatamente per tutti i

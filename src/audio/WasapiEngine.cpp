@@ -527,7 +527,18 @@ bool WasapiEngine::start()
         return false;
     }
 
-    d->refreshDeviceList(false);
+    // emitSignals=true: PatchManager scopre OGNI sink (fisico o già
+    // connesso via Bluetooth) esclusivamente tramite nodeAdded, non con una
+    // chiamata separata tipo "dammi la lista attuale" — vedi il commento in
+    // PatchManager.cpp sopra la connessione a nodeAdded ("copre sia i jack
+    // hardware sia i sink Bluetooth già connessi al momento dell'avvio").
+    // Con false (come qui prima) i device già presenti all'avvio (praticamente
+    // sempre almeno l'output di default) restavano scoperti solo
+    // internamente in Impl::nodes, mai annunciati alla UI: colonna Output
+    // vuota per sempre finché un device non veniva ricollegato DOPO l'avvio
+    // (unico modo in cui prima scattava un refreshDeviceList(true) reale).
+    // Bug reale, mai visto finché il backend non è girato su Windows vero.
+    d->refreshDeviceList(true);
 
     auto *notificationClient = new EndpointNotificationClient(d.get());
     d->enumerator->RegisterEndpointNotificationCallback(notificationClient);
