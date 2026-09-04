@@ -38,6 +38,13 @@ ApplicationWindow {
     // dall'utente come "peggiorato" rispetto a prima. Stessa causa di fondo
     // (xdgdesktopportal, vedi sotto), stesso colore per coerenza visiva.
     palette.window: "#F0F0EE"
+    // palette.button, stesso motivo di palette.window sopra: senza, i Button
+    // nativi (Play/Pausa/Stop/Trasforma/+/↻ ecc., tutti senza background
+    // custom) restano scuri con sopra il testo scuro forzato di
+    // palette.buttonText — invisibili esattamente come lo era il resto della
+    // finestra prima del fix sopra, solo che ora risaltano di più perché
+    // intorno è tutto chiaro invece di essere ugualmente scuro.
+    palette.button: "#F0F0EE"
 
     // Sfondo della finestra impostato esplicitamente (non lasciato al
     // default della palette): senza, ApplicationWindow dipende da

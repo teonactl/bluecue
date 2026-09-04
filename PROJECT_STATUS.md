@@ -1211,7 +1211,13 @@ Xtreme 3 vera già accoppiata) — Bluetooth e output funzionano, ma due bug:
   diventava chiaro — uno strappo netto tra due zone invece del problema
   uniforme di prima. **Fix v2**: aggiunto anche `palette.window: "#F0F0EE"`
   (NON `palette.base`, lasciata intatta apposta per non rompere lo sfondo
-  scuro nativo voluto di `nicknameField`, vedi il commento lì).
+  scuro nativo voluto di `nicknameField`, vedi il commento lì). **Retest
+  ancora lo stesso giorno: "sempre peggio"** — MenuBar finalmente a posto,
+  ma ora risaltavano i Button nativi senza background custom
+  (Play/Pausa/Stop/Trasforma/+/↻ ecc.): scuri con sopra il testo scuro
+  forzato di `palette.buttonText`, invisibili come lo era tutto il resto
+  prima, solo più evidenti ora che intorno è chiaro. **Fix v3**: aggiunto
+  anche `palette.button: "#F0F0EE"`.
 - **Etichette del pannello Trasforma bloccate sul nome tecnico grezzo
   PipeWire (es. "bluez_output.54_15_89_75_DD_AF.1") invece del nome
   leggibile ("JBL Xtreme 3"), a intermittenza ("è riapparso").** Causa:
