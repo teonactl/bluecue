@@ -225,6 +225,10 @@ struct CoreAudioEngine::Impl
 
     struct AggregateRouting { AudioDeviceID aggregateId = 0; };
     QMap<uint32_t, AggregateRouting> routing; // producerNodeId -> aggregate
+    // producerNodeId -> UID del device fisico a cui l'AudioQueue è
+    // attualmente puntata DIRETTAMENTE (bypassando l'aggregate) — usato
+    // quando c'è un solo output collegato, vedi syncAggregateForProducer.
+    QMap<uint32_t, QString> directRouting;
 
     // Parametri keepalive condivisi (letti da ogni AudioQueue di keepalive
     // attiva, uno per sink — vedi setKeepAliveEnabled) — stessi default di
@@ -348,6 +352,7 @@ struct CoreAudioEngine::Impl
                 AudioHardwareDestroyAggregateDevice(it->aggregateId);
                 routing.erase(it);
             }
+            directRouting.remove(producerNodeId);
             return;
         }
 
@@ -362,6 +367,51 @@ struct CoreAudioEngine::Impl
                      "routing abbandonato silenziosamente", static_cast<int>(targets.size()), producerNodeId);
             return;
         }
+
+        // Un solo output collegato (il caso più comune): niente aggregate.
+        // AudioHardwareCreateAggregateDevice crea un aggregate "a canali
+        // sommati" pensato per la cattura sincronizzata multi-device, non
+        // un vero "Multi-Output Device" che duplica lo stesso audio su ogni
+        // sotto-dispositivo — inoltre è privato (kAudioAggregateDeviceIsPrivateKey,
+        // per non sporcare Audio MIDI Setup con un device tecnico), il che
+        // lo rende invisibile anche per la diagnosi visuale. Se un solo
+        // output è collegato non serve comunque nessun mixing: si punta
+        // l'AudioQueue DIRETTAMENTE sul device fisico via lo stesso
+        // kAudioQueueProperty_CurrentDevice, un percorso molto più comune e
+        // testato di quello con l'aggregate.
+        if (uids.size() == 1) {
+            if (it != routing.end() && it->aggregateId != 0) {
+                ownAggregateIds.remove(it->aggregateId);
+                AudioHardwareDestroyAggregateDevice(it->aggregateId);
+                routing.erase(it);
+            }
+
+            const QString &targetUid = uids.first();
+            if (directRouting.value(producerNodeId) == targetUid)
+                return; // già instradato lì, nulla da fare
+
+            auto streamIt = fileStreams.find(producerNodeId);
+            if (streamIt == fileStreams.end() || !streamIt->second->queue) {
+                qWarning("CoreAudioEngine: producer %u non ha (più) uno stream file attivo: "
+                         "routing diretto verso %s non applicato", producerNodeId, qPrintable(targetUid));
+                return;
+            }
+
+            qDebug("CoreAudioEngine: routing diretto (senza aggregate) del producer %u verso %s",
+                   producerNodeId, qPrintable(targetUid));
+            AudioQueueStop(streamIt->second->queue, true);
+            CFStringRef uidRef = toCFString(targetUid);
+            const OSStatus setDeviceStatus = AudioQueueSetProperty(streamIt->second->queue, kAudioQueueProperty_CurrentDevice,
+                                                                     &uidRef, sizeof(uidRef));
+            logStatus("AudioQueueSetProperty(CurrentDevice -> device fisico diretto)", setDeviceStatus);
+            CFRelease(uidRef);
+            const OSStatus restartStatus = AudioQueueStart(streamIt->second->queue, nullptr);
+            logStatus("AudioQueueStart (dopo redirect diretto)", restartStatus);
+            directRouting[producerNodeId] = targetUid;
+            return;
+        }
+
+        directRouting.remove(producerNodeId);
 
         CFMutableArrayRef subDeviceList = CFArrayCreateMutable(kCFAllocatorDefault, uids.size(), &kCFTypeArrayCallBacks);
         for (const QString &uid : uids) {
@@ -661,6 +711,7 @@ void CoreAudioEngine::stop()
             AudioHardwareDestroyAggregateDevice(it->aggregateId);
     }
     d->routing.clear();
+    d->directRouting.clear();
 }
 
 QVector<AudioNode> CoreAudioEngine::nodes() const

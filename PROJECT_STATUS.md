@@ -1550,3 +1550,50 @@ e mandare l'output: i nuovi log dovrebbero indicare esattamente quale
 chiamata CoreAudio fallisce (o se nessuna fallisce, il problema è altrove
 — es. volume/mute dell'aggregate, o l'aggregate stesso non accetta un
 sink Bluetooth come sub-device sull'hardware specifico dell'utente).
+
+**Diagnosi e fix tentato (2026-09-04, stessa giornata)**: log reale
+dell'utente con la diagnostica sopra — nessun `OSStatus` di errore in
+nessuna chiamata (apertura file, creazione aggregate, redirect
+dell'`AudioQueue`), eppure silenzio totale. Verifiche fuori dal codice
+(chieste all'utente): (1) la stessa cassa Bluetooth riproduce
+correttamente l'audio di sistema macOS al di fuori di BlueCue → esclude
+problemi di pairing/codec/hardware; (2) con **un solo** output Bluetooth
+collegato (niente altoparlanti interni insieme), ancora silenzio totale →
+esclude che il problema sia specifico del multi-output (canali sommati
+invece che duplicati, vedi sotto) e lo isola sul percorso "singolo
+output"; (3) Audio MIDI Setup.app non mostra alcun device
+"BlueCue Route ..." — atteso, non un sintomo: l'aggregate è creato con
+`kAudioAggregateDeviceIsPrivateKey=1` apposta per non comparire lì,
+quindi questo controllo non prova né smentisce nulla.
+
+Sospetto principale, non ancora confermato dall'utente: `AudioHardwareCreateAggregateDevice`
+crea un aggregate "a canali sommati" (pensato per la cattura sincronizzata
+multi-device), non un vero "Multi-Output Device" macOS (che duplica lo
+stesso audio su ogni sotto-dispositivo per la riproduzione — quel tipo di
+device è realizzabile solo da Audio MIDI Setup, non dall'API pubblica);
+inoltre `kAudioQueueProperty_CurrentDevice` puntato su un aggregate
+*privato* creato al volo è un percorso molto meno testato/comune di
+puntarlo direttamente su un device fisico reale, e in giro si trovano
+segnalazioni di sviluppatori per cui risulta silenziosamente inefficace.
+
+**Fix applicato**: `syncAggregateForProducer` ora **bypassa completamente
+l'aggregate quando c'è un solo output collegato** (il caso più comune in
+assoluto — una traccia verso una cassa) instradando l'`AudioQueue`
+direttamente sul device fisico via lo stesso `kAudioQueueProperty_CurrentDevice`,
+senza passare da nessun aggregate. L'aggregate resta usato SOLO quando
+davvero servono 2+ output simultanei per la stessa traccia (fan-out reale,
+caso più raro), dove il limite "canali sommati vs duplicati" resta un
+problema aperto da verificare separatamente. Nuovo stato
+`Impl::directRouting` (producerNodeId → UID del device fisico corrente)
+per sapere quando è già instradato correttamente ed evitare uno
+Stop/Start ridondante ad ogni chiamata.
+
+**Non ancora confermato**: nessun ambiente macOS disponibile in questa
+sessione per compilare/testare — serve un nuovo giro di CI + test reale
+(stesso scenario: traccia collegata a UNA sola cassa Bluetooth) per
+verificare se questo risolve il silenzio. Se risultasse ancora silenzioso
+nonostante il routing diretto (bypassando l'aggregate), il sospetto si
+sposterebbe su qualcos'altro di più fondamentale (es. permessi/entitlement
+audio non ancora concessi del tutto, o l'MP3 di test non decodificato
+correttamente nonostante il log mostri frame/canali/sample-rate plausibili) —
+da investigare con altri log mirati al prossimo giro.
