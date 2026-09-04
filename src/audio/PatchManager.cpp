@@ -316,6 +316,19 @@ void PatchManager::handleSinkNode(const AudioNode &node)
         if (m_keepAliveSettingEnabled)
             m_engine->setKeepAliveEnabled(node.id, true);
     }
+
+    // Una cassa Bluetooth arriva quasi sempre SENZA descrizione leggibile
+    // nel primo nodeAdded, valorizzata un istante dopo da un nodeUpdated
+    // (stesso motivo di isBluetooth sopra). m_outputs->upsertNode già
+    // rispecchia la descrizione aggiornata in colonna Output da solo (è un
+    // model Qt, si aggiorna via dataChanged), ma cueModel() — da cui il
+    // pannello Trasforma legge desiredOutputLabels via effectiveOutputLabel
+    // — è ricalcolato SOLO quando scatta cuesChanged(): senza emetterlo
+    // anche qui, il pannello resta bloccato sul nome tecnico grezzo
+    // (es. "bluez_output.54_15_89_75_DD_AF.1") finché qualcos'altro non
+    // innesca cuesChanged() per un altro motivo — bug osservato dal vivo,
+    // intermittente proprio per questo.
+    emit cuesChanged();
 }
 
 void PatchManager::handleAppStreamNode(const AudioNode &node)

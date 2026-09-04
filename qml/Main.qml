@@ -28,6 +28,21 @@ ApplicationWindow {
     palette.text: "#2C2C2A"
     palette.buttonText: "#2C2C2A"
 
+    // Sfondo della finestra impostato esplicitamente (non lasciato al
+    // default della palette): senza, ApplicationWindow dipende da
+    // palette.window, che con QT_QPA_PLATFORMTHEME=xdgdesktopportal (vedi
+    // main.cpp) viene sintetizzato automaticamente in base al tema
+    // chiaro/scuro del desktop. Sul sistema di sviluppo (KDE, con
+    // l'integrazione Plasma completa) il risultato era un grigio scuro
+    // ragionevole; nell'AppImage impacchettata — Qt "nudo", senza
+    // l'integrazione KDE — lo stesso plugin genera una palette scura molto
+    // più cruda (quasi nera), testata dal vivo (2026-09-04): sfondo quasi
+    // nero, testo forzato scuro sopra praticamente illeggibile. Un colore
+    // fisso, coerente con la famiglia chiara già usata ovunque nell'app
+    // (#F0F0EE, vedi PortRow/dialoghi), rende l'aspetto identico a
+    // prescindere da tema di sistema o packaging.
+    color: "#F0F0EE"
+
     menuBar: MenuBar {
         Menu {
             title: qsTr("File")

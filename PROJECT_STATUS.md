@@ -1178,6 +1178,50 @@ chiariti nella stessa sessione:
   `CoreAudioEngine::start()` (mai testato dal vivo, ma stesso schema di
   codice, quasi certo lo stesso problema su macOS).
 
+## Bug trovati testando l'AppImage Linux scaricata "a freddo" (2026-09-04)
+
+Stesso principio delle scoperte Windows sopra: il test "dal vivo" di questo
+progetto è sempre stato `./build/bluecue` lanciato contro il Qt di sistema,
+MAI l'AppImage effettivamente scaricabile dalla release. Primo test reale
+dell'AppImage (sul sistema di sviluppo stesso, Linux/KDE, con una JBL
+Xtreme 3 vera già accoppiata) — Bluetooth e output funzionano, ma due bug:
+
+- **Sfondo della finestra quasi nero, testo pressoché illeggibile ovunque
+  tranne le righe con colori propri (es. le righe Output).**
+  `main.cpp` forza `QT_QPA_PLATFORMTHEME=xdgdesktopportal` su Linux (per il
+  file picker nativo, vedi la nota lì). Quel plugin, da Qt 6.5+, sintetizza
+  in automatico una QPalette scura quando il desktop preferisce il tema
+  scuro (portale `org.freedesktop.appearance`, chiave `color-scheme`) — sul
+  sistema di sviluppo (KDE Plasma, integrazione completa) il risultato è un
+  grigio scuro ragionevole; nell'AppImage, che impacchetta un Qt "nudo"
+  senza l'integrazione Plasma (confermato ispezionando l'AppImage costruita
+  in locale: `plugins/platformthemes/` contiene solo
+  `libqxdgdesktopportal.so`, nessun plugin "kde"), lo stesso rilevamento dà
+  una palette molto più cruda e scura — quasi nera, con `palette.windowText`
+  forzato scuro sopra (vedi sotto) praticamente invisibile. `ApplicationWindow`
+  non impostava mai un colore di sfondo proprio, quindi ereditava questa
+  palette automatica invece di un colore fisso. **Fix**: aggiunto
+  `color: "#F0F0EE"` esplicito su `ApplicationWindow` in `Main.qml` — stessa
+  famiglia di grigio chiaro già usata ovunque nell'app (righe Output,
+  dialoghi), indipendente dal tema di sistema o dal tipo di packaging.
+- **Etichette del pannello Trasforma bloccate sul nome tecnico grezzo
+  PipeWire (es. "bluez_output.54_15_89_75_DD_AF.1") invece del nome
+  leggibile ("JBL Xtreme 3"), a intermittenza ("è riapparso").** Causa:
+  `PatchManager::handleSinkNode()` (chiamato sia da `nodeAdded` che da
+  `nodeUpdated` — una cassa Bluetooth arriva quasi sempre SENZA descrizione
+  leggibile nel primo annuncio, valorizzata un istante dopo via
+  `nodeUpdated`) aggiorna correttamente `m_outputNodeDescriptions` e la
+  colonna Output (un `PortModel`, si aggiorna da solo via `dataChanged`) ma
+  non emetteva mai `cuesChanged()` — e `desiredOutputLabels` (le etichette
+  del pannello Trasforma, lette da `effectiveOutputLabel()`) si ricalcola
+  SOLO quando `cuesChanged()` scatta. Il pannello restava quindi bloccato
+  sull'etichetta calcolata al primo giro (nome grezzo, descrizione non
+  ancora arrivata) finché qualcos'altro non innescava `cuesChanged()` per
+  un motivo slegato — da qui l'intermittenza ("riappare"). **Fix**: emesso
+  `cuesChanged()` anche in `handleSinkNode()`.
+
+Nessuno dei due fix ancora riverificato dal vivo dopo la correzione.
+
 ## Bug trovati per revisione statica del codice nei backend Windows/macOS
 (2026-09-02/03), mai testati dal vivo
 
