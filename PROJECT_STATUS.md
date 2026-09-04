@@ -1517,3 +1517,36 @@ un nuovo giro di CI + test reale sul Mac dell'utente per verificare che
 l'app superi l'avvio e che il prompt di permesso Bluetooth (e poi
 microfono, quando si usa la calibrazione) compaia correttamente invece di
 ricrashare.
+
+**Retest (2026-09-04, stesso giorno): l'app parte e si connette alle casse
+Bluetooth, ma nessun audio si sente.** `CoreAudioEngine.cpp` (backend
+macOS) non era mai stato compilato prima della CI di questa sessione —
+vedi la nota in cima al file — quindi è il primissimo giro su hardware
+reale, ed è pieno di chiamate CoreAudio/AudioToolbox il cui `OSStatus` di
+ritorno non veniva controllato: un fallimento a qualunque passo del
+routing (creazione dell'aggregate device per il sink Bluetooth, redirect
+dell'`AudioQueue` verso quell'aggregate, lettura/conversione del formato
+del file) sarebbe rimasto completamente silenzioso. **Aggiunta
+diagnostica** (non un fix mirato — non è ancora chiaro QUALE dei passi
+fallisce): nuovo helper `logStatus()` (namespace anonimo, decodifica
+l'`OSStatus` come four-char-code quando stampabile, altrimenti il codice
+numerico) chiamato su ogni chiamata CoreAudio precedentemente non
+controllata nel percorso critico — apertura/formato file
+(`ExtAudioFileGetProperty`/`SetProperty`), creazione buffer e avvio coda
+iniziale, creazione dell'aggregate device (già segnalata all'utente via
+`engineError`, ora anche loggata con lo status esatto), aggiornamento del
+sub-device-list su un aggregate già esistente, e soprattutto il redirect
+`AudioQueueStop`/`AudioQueueSetProperty(CurrentDevice)`/`AudioQueueStart`
+verso l'aggregate — quest'ultimo è il sospetto principale, dato che è
+l'unico punto che sposta davvero l'audio dal device di default (dove il
+producer parte sempre appena creato) al sink Bluetooth. Aggiunti anche
+`qDebug`/`qWarning` di tracciamento (formato file aperto, target UID
+risolti per il routing, se il producer aveva ancora davvero uno stream
+attivo al momento del redirect). **Prossimo passo**: l'utente deve
+rilanciare l'app da Terminale (`/Applications/BlueCue.app/Contents/MacOS/bluecue-app`,
+NON con doppio click — altrimenti stdout/stderr non è visibile), riprodurre
+lo stesso scenario (traccia collegata a una cassa Bluetooth, nessun audio)
+e mandare l'output: i nuovi log dovrebbero indicare esattamente quale
+chiamata CoreAudio fallisce (o se nessuna fallisce, il problema è altrove
+— es. volume/mute dell'aggregate, o l'aggregate stesso non accetta un
+sink Bluetooth come sub-device sull'hardware specifico dell'utente).

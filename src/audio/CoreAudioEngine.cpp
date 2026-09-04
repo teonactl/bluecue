@@ -13,6 +13,7 @@
 #include <dispatch/dispatch.h>
 #include <Block.h>
 
+#include <QDebug>
 #include <QMutex>
 #include <QMutexLocker>
 #include <QMetaObject>
@@ -21,6 +22,7 @@
 #include <QString>
 #include <QTimer>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -29,6 +31,35 @@
 #include <vector>
 
 namespace {
+
+// Diagnostica per il primo giro di test su hardware reale (vedi la nota in
+// cima al file: questo backend non era mai stato compilato prima). Molte
+// chiamate CoreAudio/AudioToolbox qui sotto non controllavano l'OSStatus di
+// ritorno, quindi un fallimento (es. l'aggregate device non accetta il sink
+// Bluetooth, o il redirect dell'AudioQueue non si applica) restava
+// completamente silenzioso — "si connette ma non si sente niente" senza
+// nessun indizio nei log. logStatus stampa via qWarning il codice a 4
+// caratteri (lo stesso formato che compare nei crash report/Console.app di
+// Apple, es. '!obj'), solo quando lo stato NON è noErr.
+void logStatus(const char *what, OSStatus status)
+{
+    if (status == noErr)
+        return;
+    char code[5] = { 0 };
+    const uint32_t be = static_cast<uint32_t>(status);
+    code[0] = static_cast<char>((be >> 24) & 0xFF);
+    code[1] = static_cast<char>((be >> 16) & 0xFF);
+    code[2] = static_cast<char>((be >> 8) & 0xFF);
+    code[3] = static_cast<char>(be & 0xFF);
+    const bool printable = std::isprint(static_cast<unsigned char>(code[0]))
+        && std::isprint(static_cast<unsigned char>(code[1]))
+        && std::isprint(static_cast<unsigned char>(code[2]))
+        && std::isprint(static_cast<unsigned char>(code[3]));
+    if (printable)
+        qWarning("CoreAudioEngine: %s fallito, OSStatus=%d ('%s')", what, static_cast<int>(status), code);
+    else
+        qWarning("CoreAudioEngine: %s fallito, OSStatus=%d", what, static_cast<int>(status));
+}
 
 // Converte una QString in un CFStringRef posseduto dal chiamante (va
 // rilasciato con CFRelease). Serve ovunque le API CoreAudio vogliono un
@@ -326,8 +357,11 @@ struct CoreAudioEngine::Impl
             if (!uid.isEmpty())
                 uids.append(uid);
         }
-        if (uids.isEmpty())
+        if (uids.isEmpty()) {
+            qWarning("CoreAudioEngine: nessun UID risolto per i %d output collegati al producer %u, "
+                     "routing abbandonato silenziosamente", static_cast<int>(targets.size()), producerNodeId);
             return;
+        }
 
         CFMutableArrayRef subDeviceList = CFArrayCreateMutable(kCFAllocatorDefault, uids.size(), &kCFTypeArrayCallBacks);
         for (const QString &uid : uids) {
@@ -342,17 +376,23 @@ struct CoreAudioEngine::Impl
         }
 
         if (it != routing.end() && it->aggregateId != 0) {
+            qDebug("CoreAudioEngine: aggiorno sub-device-list dell'aggregate %u per producer %u (%d target)",
+                   it->aggregateId, producerNodeId, static_cast<int>(uids.size()));
             // Aggregate già esistente: basta aggiornare il sub-device-list
             // "a caldo" — kAudioAggregateDevicePropertyFullSubDeviceList è
             // documentata come impostabile su un aggregate già creato.
             AudioObjectPropertyAddress addr{ kAudioAggregateDevicePropertyFullSubDeviceList,
                                               kAudioObjectPropertyScopeGlobal,
                                               kAudioObjectPropertyElementMain };
-            AudioObjectSetPropertyData(it->aggregateId, &addr, 0, nullptr,
-                                        sizeof(CFArrayRef), &subDeviceList);
+            const OSStatus status = AudioObjectSetPropertyData(it->aggregateId, &addr, 0, nullptr,
+                                                                 sizeof(CFArrayRef), &subDeviceList);
+            logStatus("AudioObjectSetPropertyData(FullSubDeviceList)", status);
             CFRelease(subDeviceList);
             return;
         }
+
+        qDebug("CoreAudioEngine: creo un nuovo aggregate device per producer %u (%d target: %s)",
+               producerNodeId, static_cast<int>(uids.size()), qPrintable(uids.join(", ")));
 
         // Nuovo aggregate.
         const QString aggregateUid = QStringLiteral("com.bluecue.route.%1").arg(producerNodeId);
@@ -388,12 +428,14 @@ struct CoreAudioEngine::Impl
         CFRelease(nameRef);
         CFRelease(uidRef);
 
+        logStatus("AudioHardwareCreateAggregateDevice", status);
         if (status != noErr || aggregateId == 0) {
             QMetaObject::invokeMethod(engine, [this]() {
                 emit engine->engineError(QStringLiteral("Creazione aggregate device fallita"));
             }, Qt::QueuedConnection);
             return;
         }
+        qDebug("CoreAudioEngine: aggregate device %u creato per producer %u", aggregateId, producerNodeId);
 
         ownAggregateIds.insert(aggregateId);
         routing[producerNodeId] = AggregateRouting{ aggregateId };
@@ -417,10 +459,17 @@ struct CoreAudioEngine::Impl
             // collegamento.
             AudioQueueStop(streamIt->second->queue, true);
             CFStringRef aggregateUidRef = toCFString(aggregateUid);
-            AudioQueueSetProperty(streamIt->second->queue, kAudioQueueProperty_CurrentDevice,
-                                   &aggregateUidRef, sizeof(aggregateUidRef));
+            const OSStatus setDeviceStatus = AudioQueueSetProperty(streamIt->second->queue, kAudioQueueProperty_CurrentDevice,
+                                                                     &aggregateUidRef, sizeof(aggregateUidRef));
+            logStatus("AudioQueueSetProperty(CurrentDevice -> aggregate)", setDeviceStatus);
             CFRelease(aggregateUidRef);
-            AudioQueueStart(streamIt->second->queue, nullptr);
+            const OSStatus restartStatus = AudioQueueStart(streamIt->second->queue, nullptr);
+            logStatus("AudioQueueStart (dopo redirect verso aggregate)", restartStatus);
+            qDebug("CoreAudioEngine: producer %u redirezionato sull'aggregate %u", producerNodeId, aggregateId);
+        } else {
+            qWarning("CoreAudioEngine: producer %u non ha (più) uno stream file attivo: "
+                     "l'aggregate %u resta collegato ai sink ma nessuna AudioQueue vi scrive sopra",
+                     producerNodeId, aggregateId);
         }
     }
 };
@@ -676,7 +725,8 @@ QString CoreAudioEngine::createFileStream(const QString &filePath, const QString
 
     AudioStreamBasicDescription fileFormat{};
     UInt32 size = sizeof(fileFormat);
-    ExtAudioFileGetProperty(audioFile, kExtAudioFileProperty_FileDataFormat, &size, &fileFormat);
+    logStatus("ExtAudioFileGetProperty(FileDataFormat)",
+              ExtAudioFileGetProperty(audioFile, kExtAudioFileProperty_FileDataFormat, &size, &fileFormat));
 
     AudioStreamBasicDescription clientFormat{};
     clientFormat.mSampleRate = fileFormat.mSampleRate;
@@ -687,11 +737,16 @@ QString CoreAudioEngine::createFileStream(const QString &filePath, const QString
     clientFormat.mFramesPerPacket = 1;
     clientFormat.mBytesPerFrame = sizeof(float) * clientFormat.mChannelsPerFrame;
     clientFormat.mBytesPerPacket = clientFormat.mBytesPerFrame;
-    ExtAudioFileSetProperty(audioFile, kExtAudioFileProperty_ClientDataFormat, sizeof(clientFormat), &clientFormat);
+    logStatus("ExtAudioFileSetProperty(ClientDataFormat)",
+              ExtAudioFileSetProperty(audioFile, kExtAudioFileProperty_ClientDataFormat, sizeof(clientFormat), &clientFormat));
 
     SInt64 totalFrames = 0;
     size = sizeof(totalFrames);
-    ExtAudioFileGetProperty(audioFile, kExtAudioFileProperty_FileLengthFrames, &size, &totalFrames);
+    logStatus("ExtAudioFileGetProperty(FileLengthFrames)",
+              ExtAudioFileGetProperty(audioFile, kExtAudioFileProperty_FileLengthFrames, &size, &totalFrames));
+    qDebug("CoreAudioEngine: file '%s' aperto — %lld frame, %d canali, %.0f Hz",
+           qPrintable(filePath), static_cast<long long>(totalFrames),
+           static_cast<int>(clientFormat.mChannelsPerFrame), clientFormat.mSampleRate);
 
     auto state = std::make_unique<Impl::FileStreamState>();
     state->channelCount = static_cast<int>(clientFormat.mChannelsPerFrame);
@@ -741,10 +796,10 @@ QString CoreAudioEngine::createFileStream(const QString &filePath, const QString
     const UInt32 bufferByteSize = kBufferFrames * clientFormat.mBytesPerFrame;
     for (int i = 0; i < kBufferCount; ++i) {
         AudioQueueBufferRef buffer = nullptr;
-        AudioQueueAllocateBuffer(queue, bufferByteSize, &buffer);
+        logStatus("AudioQueueAllocateBuffer", AudioQueueAllocateBuffer(queue, bufferByteSize, &buffer));
         fileStreamOutputCallback(ctx, queue, buffer);
     }
-    AudioQueueStart(queue, nullptr);
+    logStatus("AudioQueueStart (device di default, prima di un eventuale routing)", AudioQueueStart(queue, nullptr));
 
     const QString streamName = state->name;
     {
@@ -813,6 +868,7 @@ void CoreAudioEngine::setFileStreamActive(uint32_t nodeId, bool active)
 
 uint32_t CoreAudioEngine::linkNodes(uint32_t outputNodeId, uint32_t inputNodeId)
 {
+    qDebug("CoreAudioEngine::linkNodes producer=%u -> sink=%u", outputNodeId, inputNodeId);
     const uint32_t linkId = d->nextLinkId++;
     d->links.append(Impl::LinkEntry{ linkId, outputNodeId, inputNodeId });
     d->syncAggregateForProducer(outputNodeId);
