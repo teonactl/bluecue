@@ -574,10 +574,14 @@ signals:
     void microphonesChanged();
     void calibrationStateChanged();
     // Esito finale (successo o fallimento con motivo) di
-    // calibrateOutputDelay, per un messaggio nella UI — il valore
-    // applicato si vede già riflesso nel pulsante "⏱" del sink coinvolto,
-    // non serve ripeterlo qui.
-    void calibrationResult(bool success, const QString &message);
+    // calibrateOutputDelay, per un messaggio nella UI. Il valore già
+    // applicato/persistito ai due sink coinvolti viene ripetuto qui
+    // (nodeIdA/delayMsA, nodeIdB/delayMsB) così il dialog di ritardo può
+    // aggiornare da solo lo SpinBox del sink che ha aperto, senza dover
+    // rileggere il modello degli output.
+    void calibrationResult(bool success, const QString &message,
+                            uint32_t nodeIdA, int delayMsA,
+                            uint32_t nodeIdB, int delayMsB);
     void patchError(const QString &message);
 
 private:

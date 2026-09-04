@@ -608,11 +608,30 @@ ApplicationWindow {
             }
         }
 
+        // Chiude da solo il dialog dopo una calibrazione riuscita —
+        // richiesto esplicitamente dall'utente ("vorrei che si inserisse
+        // automaticamente il valore trovato e confermasse da solo"): il
+        // valore è già applicato e persistito lato PatchManager appena
+        // arriva calibrationResult, questo timer serve solo a lasciare
+        // un attimo per leggere il messaggio prima di chiudere.
+        Timer {
+            id: autoConfirmTimer
+            interval: 900
+            onTriggered: delayDialog.close()
+        }
+
         Connections {
             target: patchManager
-            function onCalibrationResult(success, message) {
+            function onCalibrationResult(success, message, nodeIdA, delayMsA, nodeIdB, delayMsB) {
                 calibrationResultLabel.text = message
                 calibrationResultLabel.color = success ? "#7FD37F" : "#E57373"
+                if (!success)
+                    return
+                if (delayDialog.nodeId === nodeIdA)
+                    delaySpinBox.value = delayMsA
+                else if (delayDialog.nodeId === nodeIdB)
+                    delaySpinBox.value = delayMsB
+                autoConfirmTimer.restart()
             }
         }
     }

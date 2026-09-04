@@ -246,20 +246,21 @@ PatchManager::PatchManager(AudioEngine *engine, BluetoothManager *blueZ, QObject
         m_calibrationInProgress = false;
         emit calibrationStateChanged();
         if (!success) {
-            emit calibrationResult(false, message);
+            emit calibrationResult(false, message, sinkA, 0, sinkB, 0);
             return;
         }
+        int delayA = 0;
+        int delayB = 0;
         if (deltaMsAtoB > 0) {
-            setOutputDelayMs(sinkA, deltaMsAtoB);
-            setOutputDelayMs(sinkB, 0);
+            delayA = deltaMsAtoB;
         } else if (deltaMsAtoB < 0) {
-            setOutputDelayMs(sinkB, -deltaMsAtoB);
-            setOutputDelayMs(sinkA, 0);
-        } else {
-            setOutputDelayMs(sinkA, 0);
-            setOutputDelayMs(sinkB, 0);
+            delayB = -deltaMsAtoB;
         }
-        emit calibrationResult(true, tr("Ritardo misurato: %1ms").arg(qAbs(deltaMsAtoB)));
+        setOutputDelayMs(sinkA, delayA);
+        setOutputDelayMs(sinkB, delayB);
+        emit calibrationResult(true,
+                                tr("Ritardo misurato: %1ms — applicato e salvato automaticamente").arg(qAbs(deltaMsAtoB)),
+                                sinkA, delayA, sinkB, delayB);
     });
 
     // Nota: PipeWireEngine::fileStreamLooped (un giro completo del file) non
