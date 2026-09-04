@@ -436,8 +436,63 @@ struct CoreAudioEngine::Impl
                                                                      &uidRef, sizeof(uidRef));
             logStatus("AudioQueueSetProperty(CurrentDevice -> device fisico diretto)", setDeviceStatus);
             CFRelease(uidRef);
+
+            // Verifica che il valore sia REALMENTE quello impostato (un
+            // OSStatus noErr non garantisce che il sistema l'abbia accettato
+            // per davvero, solo che la chiamata in sé è andata a buon fine)
+            // e che l'AudioQueue si consideri davvero avviata.
+            CFStringRef readBackUid = nullptr;
+            UInt32 readBackSize = sizeof(readBackUid);
+            const OSStatus readBackStatus = AudioQueueGetProperty(streamIt->second->queue, kAudioQueueProperty_CurrentDevice,
+                                                                    &readBackUid, &readBackSize);
+            logStatus("AudioQueueGetProperty(CurrentDevice, verifica)", readBackStatus);
+            if (readBackStatus == noErr && readBackUid) {
+                qDebug("CoreAudioEngine: CurrentDevice riletto dopo il set = %s",
+                       qPrintable(fromCFString(readBackUid)));
+                CFRelease(readBackUid);
+            }
+
             const OSStatus restartStatus = AudioQueueStart(streamIt->second->queue, nullptr);
             logStatus("AudioQueueStart (dopo redirect diretto)", restartStatus);
+
+            UInt32 isRunning = 0;
+            UInt32 isRunningSize = sizeof(isRunning);
+            const OSStatus isRunningStatus = AudioQueueGetProperty(streamIt->second->queue, kAudioQueueProperty_IsRunning,
+                                                                     &isRunning, &isRunningSize);
+            logStatus("AudioQueueGetProperty(IsRunning)", isRunningStatus);
+            qDebug("CoreAudioEngine: AudioQueue IsRunning=%u dopo lo start", isRunning);
+
+            // Il device fisico stesso pensa di essere in funzione? Se resta
+            // fermo (0) nonostante la nostra AudioQueue si creda avviata,
+            // vuol dire che il sistema non ha davvero attivato l'I/O su quel
+            // device — sintomo tipico di un device Bluetooth che macOS
+            // "sveglia" per davvero solo quando è l'uscita predefinita di
+            // sistema, non quando lo si punta direttamente da un client non
+            // di default.
+            if (!targets.isEmpty()) {
+                UInt32 deviceRunning = 0;
+                UInt32 deviceRunningSize = sizeof(deviceRunning);
+                AudioObjectPropertyAddress runningAddr{ kAudioDevicePropertyDeviceIsRunning,
+                                                          kAudioObjectPropertyScopeOutput,
+                                                          kAudioObjectPropertyElementMain };
+                const OSStatus deviceRunningStatus = AudioObjectGetPropertyData(
+                    static_cast<AudioObjectID>(targets.first()), &runningAddr, 0, nullptr,
+                    &deviceRunningSize, &deviceRunning);
+                logStatus("AudioObjectGetPropertyData(DeviceIsRunning, device target)", deviceRunningStatus);
+                qDebug("CoreAudioEngine: device fisico %u IsRunning=%u", targets.first(), deviceRunning);
+
+                Float64 deviceSampleRate = 0.0;
+                AudioObjectPropertyAddress rateAddr{ kAudioDevicePropertyNominalSampleRate,
+                                                       kAudioObjectPropertyScopeGlobal,
+                                                       kAudioObjectPropertyElementMain };
+                UInt32 rateSize = sizeof(deviceSampleRate);
+                const OSStatus rateStatus = AudioObjectGetPropertyData(
+                    static_cast<AudioObjectID>(targets.first()), &rateAddr, 0, nullptr, &rateSize, &deviceSampleRate);
+                logStatus("AudioObjectGetPropertyData(NominalSampleRate, device target)", rateStatus);
+                qDebug("CoreAudioEngine: device fisico %u sample rate nominale=%.0f Hz (coda a %.0f Hz)",
+                       targets.first(), deviceSampleRate, streamIt->second->sampleRate);
+            }
+
             directRouting[producerNodeId] = targetUid;
             return;
         }
