@@ -210,6 +210,12 @@ struct CoreAudioEngine::Impl
         std::atomic<int> loopCount{-1}; // -1 = infinito, altrimenti ripetizioni residue
         std::atomic<bool> active{true};
         void *callbackContext = nullptr; // FileStreamCallbackContext*, da liberare con delete alla rimozione
+        // Diagnostica: quante volte AudioToolbox ha davvero richiamato
+        // fileStreamOutputCallback (cioè quante volte ha chiesto altri dati
+        // da riprodurre) — il modo più diretto per sapere se l'audio sta
+        // scorrendo per davvero, indipendente da IsRunning che può leggersi
+        // in una finestra di transizione subito dopo AudioQueueStart.
+        std::atomic<uint64_t> callbackInvocations{0};
     };
     // std::map, non QMap: il valore è move-only (std::unique_ptr) e QMap
     // (a differenza di std::map) richiede che il valore sia
@@ -493,6 +499,42 @@ struct CoreAudioEngine::Impl
                        targets.first(), deviceSampleRate, streamIt->second->sampleRate);
             }
 
+            // IsRunning letto nell'istante subito dopo AudioQueueStart può
+            // essere una falsa negativa pura e semplice (transizione non
+            // ancora completata, specie per un device Bluetooth che ha una
+            // latenza di avvio non banale) — ricontrolla dopo una pausa,
+            // insieme al contatore di invocazioni della callback (la prova
+            // più diretta che l'audio sta davvero scorrendo, indipendente
+            // da IsRunning): se resta a 0 anche dopo, il buffer non viene
+            // più richiesto e il problema è reale, non un timing artefatto.
+            const uint32_t physicalDeviceId = targets.isEmpty() ? 0 : targets.first();
+            QTimer::singleShot(800, engine, [this, producerNodeId, physicalDeviceId]() {
+                auto laterIt = fileStreams.find(producerNodeId);
+                if (laterIt == fileStreams.end() || !laterIt->second->queue) {
+                    qDebug("CoreAudioEngine: [ricontrollo +800ms] producer %u non più attivo", producerNodeId);
+                    return;
+                }
+                UInt32 laterRunning = 0;
+                UInt32 laterRunningSize = sizeof(laterRunning);
+                AudioQueueGetProperty(laterIt->second->queue, kAudioQueueProperty_IsRunning,
+                                       &laterRunning, &laterRunningSize);
+                const uint64_t invocations = laterIt->second->callbackInvocations.load();
+                qDebug("CoreAudioEngine: [ricontrollo +800ms] producer %u — AudioQueue IsRunning=%u, "
+                       "callback invocata %llu volte finora", producerNodeId, laterRunning,
+                       static_cast<unsigned long long>(invocations));
+                if (physicalDeviceId != 0) {
+                    UInt32 laterDeviceRunning = 0;
+                    UInt32 laterDeviceRunningSize = sizeof(laterDeviceRunning);
+                    AudioObjectPropertyAddress runningAddr{ kAudioDevicePropertyDeviceIsRunning,
+                                                              kAudioObjectPropertyScopeOutput,
+                                                              kAudioObjectPropertyElementMain };
+                    AudioObjectGetPropertyData(static_cast<AudioObjectID>(physicalDeviceId), &runningAddr, 0, nullptr,
+                                                &laterDeviceRunningSize, &laterDeviceRunning);
+                    qDebug("CoreAudioEngine: [ricontrollo +800ms] device fisico %u IsRunning=%u",
+                           physicalDeviceId, laterDeviceRunning);
+                }
+            });
+
             directRouting[producerNodeId] = targetUid;
             return;
         }
@@ -629,6 +671,7 @@ void fileStreamOutputCallback(void *inUserData, AudioQueueRef inAQ, AudioQueueBu
     auto *ctx = static_cast<FileStreamCallbackContext *>(inUserData);
     auto *state = ctx->state;
     auto *impl = ctx->impl;
+    state->callbackInvocations.fetch_add(1, std::memory_order_relaxed);
 
     const int channels = state->channelCount;
     const int64_t totalFrames = state->channelCount > 0
