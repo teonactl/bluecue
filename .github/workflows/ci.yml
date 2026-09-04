@@ -62,7 +62,15 @@ jobs:
           install -Dm644 res/icon.svg AppDir/usr/share/icons/hicolor/scalable/apps/bluecue.svg
           install -Dm644 res/bluecue.desktop AppDir/usr/share/applications/bluecue.desktop
 
+          # QML_SOURCES_PATHS: stesso motivo del --qmldir su windeployqt/
+          # macdeployqt (vedi i job build-windows/build-macos) — senza,
+          # linuxdeploy-plugin-qt non scopre i moduli QML importati
+          # (QtQuick.Dialogs, QtQuick.Layouts) e non li include nell'AppImage.
+          # Non ancora osservato dal vivo qui perché il test "live" di questo
+          # progetto è sempre stato ./build/bluecue contro il Qt di sistema,
+          # mai l'AppImage scaricata a freddo.
           QMAKE=$(which qmake6 || which qmake) \
+          QML_SOURCES_PATHS="$PWD/qml" \
           APPIMAGE_EXTRACT_AND_RUN=1 \
           ./linuxdeploy --appdir AppDir --plugin qt --output appimage
 
@@ -136,7 +144,12 @@ jobs:
       - name: Deploy Qt nel bundle
         if: github.ref == 'refs/heads/main'
         run: |
-          "$(brew --prefix qt)/bin/macdeployqt" build/bluecue-app.app
+          # -qmldir=qml: stesso motivo del --qmldir su windeployqt (vedi
+          # commento nel job build-windows) — senza, macdeployqt non
+          # scopre i moduli QML importati (QtQuick.Dialogs, QtQuick.Layouts)
+          # e non li include nel bundle, causando lo stesso probabile
+          # mancato avvio mai verificato dal vivo su questa piattaforma.
+          "$(brew --prefix qt)/bin/macdeployqt" build/bluecue-app.app -qmldir=qml
 
       # Firma ad-hoc (nessun account Apple Developer): senza, Gatekeeper
       # blocca l'app al primo avvio dopo il download. Ordine bottom-up
@@ -247,7 +260,13 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist\BlueCue -Force | Out-Null
           Copy-Item build\bluecue.exe dist\BlueCue\
-          windeployqt --release --compiler-runtime dist\BlueCue\bluecue.exe
+          # --qmldir è OBBLIGATORIO: senza, windeployqt non ha modo di sapere
+          # quali moduli QML servono (li scopre leggendo gli "import" nei
+          # sorgenti .qml, non dal binario) e non copia i plugin di
+          # QtQuick/QtQuick.Dialogs/QtQuick.Layouts ecc. — causa dell'app che
+          # non parte affatto ("modulo non installato" nel log per QtQuick,
+          # QtQuick.Dialogs e a cascata anche Main.qml stesso).
+          windeployqt --release --compiler-runtime --qmldir qml dist\BlueCue\bluecue.exe
           Compress-Archive -Path dist\BlueCue\* -DestinationPath BlueCue-windows.zip
 
       - name: Crea installer (Inno Setup)

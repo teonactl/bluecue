@@ -1129,6 +1129,44 @@ qml/
       contemporaneamente nello stesso momento (vedi nota già presente più
       sopra su questo genere di interferenza).
 
+## Bug di packaging CI: deploy tool senza --qmldir (2026-09-04)
+
+Primo test reale su una VM Windows (VirtualBox): l'app non parte, nessuna
+finestra, nessun errore visibile nemmeno da PowerShell — coerente con
+l'ipotesi già scritta sopra (WIN32_EXECUTABLE senza console). Il file di
+log aggiunto in `main.cpp` (vedi sotto) ha permesso di leggere il vero
+motivo: warning per moduli QML "non installato" — `QtQuick`,
+`QtQuick.Dialogs` (usato da `Main.qml` per il file picker), e a cascata
+anche `Main.qml` stesso (che invece è compilato dentro l'eseguibile via
+risorsa Qt, non un file esterno — l'errore compare comunque perché
+`QQmlApplicationEngine` non riesce a risolvere la catena di import e
+segnala fallito l'intero documento).
+
+**Causa**: lo step di packaging Windows in `.github/workflows/ci.yml`
+lanciava `windeployqt` senza l'opzione `--qmldir`. Senza quel flag,
+`windeployqt` NON ha modo di sapere quali moduli QML servono all'app — li
+scopre analizzando gli `import` nei sorgenti `.qml`, non li deduce dal
+binario — quindi non copia accanto all'exe i plugin di `QtQuick`,
+`QtQuick.Dialogs`, `QtQuick.Layouts` (usato da `DurationField.qml`) ecc.
+Il motore QML, a runtime, non li trova più e l'intera UI fallisce a
+caricarsi silenziosamente (nessuna finestra, solo warning nel log).
+
+**Fix**: aggiunto `--qmldir qml` alla chiamata `windeployqt` (job
+`build-windows`). Controllato lo stesso schema anche per gli altri due
+pacchetti, mai testati scaricati e lanciati "a freddo" (solo la build
+locale Linux contro il Qt di sistema, che non manifesta il bug perché
+tutti i plugin QML sono già installati sul sistema indipendentemente dal
+packaging):
+- **macOS** (`macdeployqt`): mancava `-qmldir=qml` — aggiunto.
+- **Linux** (`linuxdeploy-plugin-qt`): mancava la variabile d'ambiente
+  `QML_SOURCES_PATHS` (l'equivalente per questo tool) — aggiunta
+  (`QML_SOURCES_PATHS="$PWD/qml"`).
+
+**Non ancora riverificato**: serve un nuovo giro di CI + un test reale
+scaricando lo zip/installer Windows aggiornato sulla stessa VM. Se
+risolve l'avvio, il codice del backend WASAPI (vedi la sezione bug
+statici sotto) diventa finalmente testabile dal vivo per la prima volta.
+
 ## Bug trovati per revisione statica del codice nei backend Windows/macOS
 (2026-09-02/03), mai testati dal vivo
 
