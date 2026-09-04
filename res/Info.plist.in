@@ -22,5 +22,11 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>BlueCue needs Bluetooth access to discover and stream audio to Bluetooth speakers.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>BlueCue needs Bluetooth access to discover and stream audio to Bluetooth speakers.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>BlueCue uses the microphone to measure output delay during acoustic calibration.</string>
 </dict>
 </plist>

@@ -1488,3 +1488,32 @@ del dispositivo (richiede una cassa reale collegata e inattiva per una
 sessione lunga, >20 minuti, oltre il tempo tipico di auto-standby, per
 vedere se resta connessa invece di spegnersi/disconnettersi come succedeva
 prima di questo fix).
+
+## Bug trovato al primo avvio reale su macOS (2026-09-04)
+
+Primo crash report reale (`.ips`) mandato dall'utente da un Mac (macOS
+15.3.1, Apple Silicon) con l'app impacchettata dalla CI: crash immediato
+all'avvio, `Termination Reason: Namespace TCC, Code 0` — "This app has
+crashed because it attempted to access privacy-sensitive data without a
+usage description." Su macOS 14+ il sistema termina il processo con
+SIGABRT non appena tocca CoreBluetooth se l'Info.plist del bundle non
+dichiara `NSBluetoothAlwaysUsageDescription` — non è un crash del nostro
+codice, è TCC che uccide il processo prima ancora che arrivi al primo
+`BlueZManager`/discovery equivalente su macOS.
+
+`res/Info.plist.in` (usato da CMake via `MACOSX_BUNDLE_INFO_PLIST`,
+`CMakeLists.txt`, unico punto in cui l'Info.plist del bundle macOS viene
+generato — nessun altro step di CI lo tocca) non aveva NESSUNA chiave di
+privacy. **Fix**: aggiunte `NSBluetoothAlwaysUsageDescription` e
+`NSBluetoothPeripheralUsageDescription` (compatibilità versioni macOS più
+vecchie). Aggiunta anche, preventivamente, `NSMicrophoneUsageDescription`:
+la calibrazione automatica del ritardo (punto 31, mic+click) userà
+CoreAudio per l'input microfono, stessa categoria di crash TCC se scatta
+prima che l'utente veda mai un prompt di permesso.
+
+**Non ancora riconfermato**: nessun ambiente macOS disponibile in questa
+sessione (sviluppo su Linux) per ricostruire e riprovare dal vivo — serve
+un nuovo giro di CI + test reale sul Mac dell'utente per verificare che
+l'app superi l'avvio e che il prompt di permesso Bluetooth (e poi
+microfono, quando si usa la calibrazione) compaia correttamente invece di
+ricrashare.
