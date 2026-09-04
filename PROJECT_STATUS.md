@@ -1597,3 +1597,47 @@ sposterebbe su qualcos'altro di più fondamentale (es. permessi/entitlement
 audio non ancora concessi del tutto, o l'MP3 di test non decodificato
 correttamente nonostante il log mostri frame/canali/sample-rate plausibili) —
 da investigare con altri log mirati al prossimo giro.
+
+**Causa reale trovata (2026-09-04, stessa giornata): non era un problema
+di routing audio, era un bug di identità del device.** Nuovo retest
+dell'utente con SOLO la cassa Bluetooth collegata (routing diretto, niente
+aggregate): il log mostra `producer=... -> sink=72` e
+`routing diretto ... verso BuiltInSpeakerDevice` — cioè gli altoparlanti
+INTERNI del Mac, non la cassa. Verificato con l'utente: aveva davvero
+trascinato il cavo sulla riga con il nome della cassa Bluetooth (non un
+errore di trascinamento), e il volume del Mac era alto e non muto (quindi
+non è nemmeno "in realtà suonava sul Mac e non se n'è accorto").
+
+**Causa**: `AudioObjectID` su macOS **non è un identificatore stabile nel
+tempo** per un device fisico — il sistema può riassegnare lo stesso numero
+a un device completamente diverso (osservato esattamente con la
+riconnessione della cassa Bluetooth: il suo id viene liberato alla
+disconnessione/rinegoziazione e può essere riciclato per un device
+diverso, qui gli altoparlanti interni, prima ancora che la cassa
+ricompaia sotto un id nuovo). `refreshDeviceList()` confrontava le liste
+"prima" e "dopo" SOLO per id numerico: con l'id ancora presente in
+entrambe le liste (anche se ora rappresenta un device diverso), il codice
+non emetteva né `nodeRemoved` né `nodeAdded` — la riga della cassa BT in
+UI restava visivamente intatta (nome mostrato preso dal `nodeAdded`
+originale, mai aggiornato) ma internamente il suo `nodeId` puntava
+silenziosamente al device nuovo. Un trascinamento verso quella riga,
+quindi, instradava correttamente verso "il nodeId di quella riga" ma quel
+nodeId nel frattempo non era più la cassa.
+
+**Fix**: `refreshDeviceList()` ora confronta anche l'UID stabile del
+device (`deviceUidString`, la stessa stringa usata per il routing reale)
+oltre all'id numerico. Se un id già noto ricompare con un UID diverso, è
+trattato come rimozione della vecchia identità + comparsa di una nuova
+sotto lo stesso numero (`nodeRemoved` seguito da `nodeAdded`, non silenzio)
+— così `PatchManager` (che già persiste il routing per NOME/UID stabile,
+non per nodeId, vedi punto 17) riconcilia correttamente la riga invece di
+restare agganciato a un device diverso. Cambiato anche l'ORDINE di
+emissione (`removed` prima di `added`, non più il contrario): con lo
+stesso id sia in `removed` che in `added` nella stessa passata, emettere
+prima `added` avrebbe fatto sparire di nuovo la riga appena ricreata dal
+successivo `nodeRemoved` per lo stesso id.
+
+**Non ancora riconfermato dall'utente**: serve un nuovo giro di CI + test
+reale (stesso scenario, traccia collegata a UNA sola cassa Bluetooth) per
+verificare che ora la riga si aggiorni correttamente e l'audio esca
+davvero sulla cassa.

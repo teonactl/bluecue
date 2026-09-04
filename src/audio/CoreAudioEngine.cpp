@@ -296,17 +296,42 @@ struct CoreAudioEngine::Impl
         QVector<uint32_t> removed;
         {
             QMutexLocker locker(&mutex);
-            QSet<uint32_t> previous;
+            // Bug reale scoperto il 2026-09-04: un AudioObjectID macOS NON
+            // è un identificatore stabile nel tempo per un device fisico —
+            // il sistema può riassegnare lo stesso numero a un device
+            // completamente diverso (osservato con la riconnessione di una
+            // cassa Bluetooth: il suo AudioObjectID viene liberato alla
+            // disconnessione e può essere riciclato dal sistema per un
+            // device diverso, es. gli altoparlanti interni, prima ancora
+            // che la cassa riappaia sotto un nuovo id). Confrontare solo
+            // gli id (come faceva questo codice) non rileva questo caso:
+            // l'id resta "presente" sia prima che dopo, quindi non scatta
+            // né nodeRemoved né nodeAdded, e la riga UI esistente (ancora
+            // etichettata col nome del device ORIGINALE) resta silenziosamente
+            // agganciata al device NUOVO senza che l'utente se ne accorga —
+            // un trascinamento verso quella riga instrada quindi verso un
+            // device sbagliato senza nessun errore. L'UID stabile
+            // (deviceUidString, la stessa stringa usata per il routing) è
+            // l'unica identità affidabile: se l'id è già noto ma il suo UID
+            // è cambiato, va trattato come rimozione del vecchio device +
+            // aggiunta del nuovo (stesso identico numero di id, identità
+            // diversa), non come "nessun cambiamento".
+            QMap<uint32_t, QString> previousUidById;
             for (const AudioNode &n : nodes)
-                previous.insert(n.id);
+                previousUidById.insert(n.id, n.name);
 
             for (const AudioNode &n : discovered) {
-                if (!previous.contains(n.id))
-                    added.append(n);
+                auto prevIt = previousUidById.find(n.id);
+                if (prevIt == previousUidById.end()) {
+                    added.append(n); // id mai visto prima
+                } else if (prevIt.value() != n.name) {
+                    removed.append(n.id); // stesso id, device diverso: chiudi la vecchia identità
+                    added.append(n);      // ...e riapri quella nuova sotto lo stesso numero
+                }
             }
-            for (uint32_t id : previous) {
-                if (!seen.contains(id))
-                    removed.append(id);
+            for (auto it = previousUidById.begin(); it != previousUidById.end(); ++it) {
+                if (!seen.contains(it.key()))
+                    removed.append(it.key());
             }
 
             nodes = discovered;
@@ -315,12 +340,18 @@ struct CoreAudioEngine::Impl
 
         if (!emitSignals)
             return;
-        for (const AudioNode &n : added) {
-            QMetaObject::invokeMethod(engine, [this, n]() { emit engine->nodeAdded(n); },
-                                       Qt::QueuedConnection);
-        }
+        // removed PRIMA di added: quando lo stesso id numerico viene
+        // riciclato per un device diverso (vedi sopra), added e removed
+        // contengono entrambi quell'id nella stessa passata — emettere
+        // added per primo cancellerebbe subito dopo la riga appena
+        // ricreata (nodeRemoved(id) successivo la eliminerebbe di nuovo),
+        // facendola sparire invece di aggiornarla.
         for (uint32_t id : removed) {
             QMetaObject::invokeMethod(engine, [this, id]() { emit engine->nodeRemoved(id); },
+                                       Qt::QueuedConnection);
+        }
+        for (const AudioNode &n : added) {
+            QMetaObject::invokeMethod(engine, [this, n]() { emit engine->nodeAdded(n); },
                                        Qt::QueuedConnection);
         }
     }
